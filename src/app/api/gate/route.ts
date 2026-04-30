@@ -85,39 +85,21 @@ export const POST = handler({ body: GateOpenBody }, async ({ body }) => {
     return deny("Session expired — settle overstay first", ctx);
   }
 
-  // ── Gate opens ──
-  const result = await triggerGateOpen();
-
-  const dirLabel = direction === "EXIT" ? "Exit" : "Entrance";
-  const details = [
-    `Gate ${dirLabel.toLowerCase()} via QR scan`,
-    deviceId ? `device:${deviceId.slice(0, 8)}` : null,
-  ].filter(Boolean).join(" — ");
-
-  await audit({
-    action: "GATE_OPEN",
-    driverId: driverId ?? session.driverId,
-    sessionId,
-    details,
-  });
-
-  // ── Suspicious entry detection — block second device ──
-  // If two consecutive ENTRANCE scans come from different devices on the
-  // same session, deny the second one and log a SUSPICIOUS_ENTRY. The
-  // legitimate driver should not be affected because they'll re-scan
-  // from their own device. Admin can override via the dashboard.
+  // ── Suspicious entry detection — must run before hardware opens ──
+  // Two consecutive ENTRANCE scans from different devices on the same
+  // session means someone cloned the QR or shared a screenshot. Deny
+  // here so the gate never opens for the suspicious request.
   if (direction === "ENTRANCE" && deviceId) {
     try {
       const recentGateEvents = await prisma.auditLog.findMany({
         where: { sessionId, action: "GATE_OPEN" },
         orderBy: { createdAt: "desc" },
-        take: 2,
-        select: { details: true, createdAt: true },
+        take: 1,
+        select: { details: true },
       });
 
-      if (recentGateEvents.length >= 2) {
-        const previous = recentGateEvents[1];
-        const prevDetails = previous.details ?? "";
+      if (recentGateEvents.length === 1) {
+        const prevDetails = recentGateEvents[0].details ?? "";
         const prevWasEntrance = prevDetails.includes("Gate entrance");
         const prevDeviceMatch = prevDetails.match(/device:(\w+)/);
         const prevDevicePrefix = prevDeviceMatch?.[1];
@@ -137,9 +119,25 @@ export const POST = handler({ body: GateOpenBody }, async ({ body }) => {
         }
       }
     } catch {
-      // Detection failed — allow the gate (fail-open for safety)
+      // Detection failed — fail-open for safety (legitimate driver not blocked)
     }
   }
+
+  // ── Gate opens ──
+  const result = await triggerGateOpen();
+
+  const dirLabel = direction === "EXIT" ? "Exit" : "Entrance";
+  const details = [
+    `Gate ${dirLabel.toLowerCase()} via QR scan`,
+    deviceId ? `device:${deviceId.slice(0, 8)}` : null,
+  ].filter(Boolean).join(" — ");
+
+  await audit({
+    action: "GATE_OPEN",
+    driverId: driverId ?? session.driverId,
+    sessionId,
+    details,
+  });
 
   return json({ ...result, openedAt: new Date().toISOString() });
 });

@@ -2,7 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { requireAdmin } from "@/lib/auth";
 import { getStripe, stripeConfigured } from "@/lib/stripe";
 import { handler, json, notFound, conflict } from "@/lib/api-handler";
-import { processChargeRefund } from "@/app/api/stripe/webhook/route";
+import { processChargeRefund } from "@/lib/stripe-checkout-service";
 
 /**
  * POST /api/admin/payments/[id]/sync-refunds

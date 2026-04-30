@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { requireAdmin } from "@/lib/auth";
 import { getStripe, stripeConfigured } from "@/lib/stripe";
 import { handler, json } from "@/lib/api-handler";
-import { processChargeRefund } from "@/app/api/stripe/webhook/route";
+import { processChargeRefund } from "@/lib/stripe-checkout-service";
 
 const Body = z.object({
   paymentIds: z.array(z.string()).max(100),

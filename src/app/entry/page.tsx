@@ -28,7 +28,7 @@ type State =
 type AllowListEntry = { name: string; label: string };
 
 type DriverResponse = {
-  driver: { id: string; name: string; phone: string; email: string } | null;
+  driver: { id: string; name: string; phone: string; email: string | null } | null;
   activeSessions?: DriverActiveSession[];
 };
 

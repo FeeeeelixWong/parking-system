@@ -8,14 +8,16 @@ A full-stack Next.js 16 parking management system for a single truck parking lot
 Drivers scan a QR code at the gate, check in via their phone (no app download), pay, and
 get assigned a spot. The admin (lot owner) manages everything from a mobile-friendly dashboard.
 
-**Stack**: Next.js 16 App Router, Prisma 7.5 + Neon PostgreSQL, QuickBooks Payments (branch),
+**Stack**: Next.js 16 App Router, Prisma 7.5 + Neon PostgreSQL, Stripe (PaymentIntents for
+one-time, Subscriptions for monthly), QuickBooks (write-only accounting mirror via Sales Receipts),
 Tailwind v4, Vercel hosting.
 
 **Branches**:
-- `main` — production-stable, deployed to Vercel. Payment disabled for testing.
-- `quickbooks-payments` — QB Payments integration (hosted checkout, OAuth, reconciliation).
-  NOT merged to main yet. Has its own payment flow, QB token management, and Payments tab.
-- `square-payments` — abandoned Square integration branch. Do not use.
+- `main` — production. Stripe payments live. QB is accounting output.
+- `data-model-cleanup` — schema/type cleanup, domain service extraction (in progress)
+- `cleanup/architecture` — broader architecture cleanup (in progress)
+- `quickbooks-payments` — old abandoned QB Payments branch (superseded by Stripe)
+- `square-payments` — abandoned. Do not use.
 
 ---
 
@@ -78,7 +80,7 @@ Gate QR codes (two physical laminated QR codes):
 
 Sessions are **time-based reservations** (hotel model), NOT gate passes.
 
-- **Session = reservation.** Driver pays for X hours or X months, spot is theirs until `expectedEnd`.
+- **Session = reservation.** Driver pays for X days or X months, spot is theirs until `expectedEnd`.
 - **Gate is decoupled from session.** Both entry and exit scans call `POST /api/gate`
   which opens the gate and logs the direction. Neither ends the session.
 - **Sessions expire by time.** When `expectedEnd` passes → grace period → cron flips
@@ -87,7 +89,7 @@ Sessions are **time-based reservations** (hotel model), NOT gate passes.
 - **Overstay settlement** uses `POST /api/sessions/exit` — only called when a driver
   is overstayed and pays the fee. This + manager override are the only paths that
   complete a session programmatically.
-- **Pricing tiers**: Hourly (1-72h) and Monthly (1-12 months). Selected at check-in.
+- **Pricing tiers**: Daily (1-30 days) and Monthly (1-12 months). Selected at check-in.
   Monthly sessions just set `expectedEnd` further out — same gate/overstay logic.
 
 ---
@@ -100,10 +102,10 @@ Six tabs:
 |-----|---------|
 | **Overview** | Live lot map (LotMapViewer) with spot status colors. Click a spot for detail panel. |
 | **Sessions** | Filterable session list (All/Active/Overstay/Completed). Expandable rows with driver/vehicle/timing/payments. Admin actions: Extend Time, Close & Backdate, Cancel Session. |
-| **Payments** | Revenue chart (30-day bar graph), summary cards, payment list with QB deep-links (Invoice ↗, Customer ↗, Refund ↗), QB reconciliation with unmatched payment flags. |
+| **Payments** | Revenue chart (30-day bar graph), summary cards, payment list with Stripe links (Charge ↗, Customer ↗), pending subscriptions, Stripe reconcile, QB receipt sync. |
 | **Drivers** | Searchable driver list with edit (name/email/phone), vehicle info, active session status. |
 | **Log** | Audit event feed with filter chips (Entry, Exit, Extension, Overstay, Gate, Admin, Notification, Security). All gate opens, denials, suspicious entries logged. |
-| **Settings** | Rates (hourly, monthly, overstay), notifications, spot config, payment toggle, bobtail overflow, parking terms (clickwrap), QB connection, allow list management. |
+| **Settings** | Rates (daily, monthly, overstay), notifications, spot config, payment toggle, bobtail overflow, parking terms (clickwrap), QB connection, allow list management. |
 
 **Auth**: JWT cookie via `src/proxy.ts` (Next.js 16 convention, not `middleware.ts`). Admin password in env var. 8-hour token expiry.
 
@@ -138,11 +140,11 @@ same session → `SUSPICIOUS_ENTRY` logged.
 |------|---------|
 | `src/lib/driver-store.ts` | localStorage: `loadDriver()`, `saveDriver()`, `clearDriver()`, `getDeviceId()` |
 | `src/lib/fetch.ts` | `apiFetch<T>()`, `apiPost<T>()` — typed fetch with automatic `res.ok` check |
-| `src/lib/payments.ts` | `verifyAndClaimPayment()` — verify charge + prevent reuse |
-| `src/lib/rates.ts` | `hourlyRate()`, `monthlyRate()`, `overstayRate()`, `addHours()`, `addMonths()`, `ceilHours()` |
+| `src/lib/rates.ts` | `dailyRate()`, `monthlyRate()`, `overstayRate()`, `addDays()`, `addMonths()`, `ceilDays()` |
 | `src/lib/time.ts` | `timeRemaining()`, `timeOverdue()`, `vehicleLabel()` — shared display helpers |
 | `src/lib/spots.ts` | `assignSpot()` (with bobtail overflow), `freeSpot()` |
-| `src/lib/quickbooks.ts` | QB API: OAuth tokens, invoice checkout, customer CRUD, payments, refunds, P&L reports |
+| `src/lib/stripe.ts` | Stripe SDK client: `getStripe()`, `stripeConfigured()`, `listRecentCharges()` |
+| `src/lib/quickbooks.ts` | QB accounting output only — writes Sales Receipts, not payment processing |
 | `src/lib/audit.ts` | `log()` — writes to AuditLog table |
 | `src/lib/gate.ts` | `triggerGateOpen()` — **STUB**, replace with Shelly HTTP call for production |
 | `src/lib/hooks.ts` | `useIsMobile()` — viewport < 640px detection |
@@ -159,25 +161,26 @@ same session → `SUSPICIOUS_ENTRY` logged.
 | `/api/vehicles` | GET, POST | Vehicle CRUD by driver |
 | `/api/sessions` | GET, POST | List active sessions, create new session |
 | `/api/sessions/exit` | POST | Overstay fee settlement |
-| `/api/sessions/extend` | POST | Extend session hours |
+| `/api/sessions/extend` | POST | Extend session days |
 | `/api/sessions/history` | GET | Paginated session history with filters |
 | `/api/spots` | GET | All spots with active sessions (for lot map) |
 | `/api/spots/layout` | GET, PUT | Lot editor state (spots + groups) — admin only for PUT |
-| `/api/spots/seed` | POST | Seed spots from settings counts |
-| `/api/settings` | GET, PUT | App settings (strips QB tokens from GET response) |
+| `/api/settings` | GET, PUT | App settings (strips sensitive tokens from GET response) |
 | `/api/audit` | GET | Audit log entries with action/pagination filters |
 | `/api/allowlist` | GET | Check phone against allow list (public) |
-| `/api/payments/checkout` | POST | Create QB invoice, return hosted checkout URL |
-| `/api/payments/create-intent` | POST | Direct charge via QB card token |
-| `/api/payments/status` | GET | Poll QB invoice status (paid/voided/partial) |
+| `/api/payments/checkout` | POST | Create Stripe Checkout session; return URL for redirect |
+| `/api/payments/lookup` | GET | Poll for Payment row after Stripe Checkout redirect |
+| `/api/stripe/webhook` | POST | Stripe webhook: creates sessions/payments, writes QB receipts |
 | `/api/admin/drivers` | GET, PUT | Admin driver search + edit |
 | `/api/admin/sessions` | PUT | Admin session actions (extend/cancel/close with backdate) |
 | `/api/admin/payments` | GET | Payment list with summary + daily revenue chart data |
+| `/api/admin/payments/pending` | GET | Past-due subscriptions |
+| `/api/admin/payments/sync-batch` | POST | Batch sync QB receipts |
 | `/api/admin/spots/override` | POST | Manager override to free a spot |
 | `/api/admin/allowlist` | GET, POST, PUT, DELETE | Allow list CRUD |
-| `/api/admin/qb-auth` | GET | Redirect to QB OAuth authorization |
-| `/api/admin/qb-auth/callback` | GET | OAuth callback, exchanges code for tokens |
-| `/api/admin/qb-data` | GET | QB payments + P&L for reconciliation |
+| `/api/admin/reconcile` | GET | Session/payment chain health checks |
+| `/api/admin/stripe-reconcile` | POST | Stripe-vs-DB divergence check |
+| `/api/admin/reconcile/charges-receipts` | GET | Charges vs QB receipts reconciliation |
 | `/api/cron/check-sessions` | GET | Expiry reminders, OVERSTAY detection, manager alerts |
 | `/api/dev/seed` | POST | Seed test data (dev only) |
 | `/api/auth/login` | POST | Admin login |
@@ -205,20 +208,26 @@ same session → `SUSPICIOUS_ENTRY` logged.
 ## Data Model (Prisma)
 
 **Enums**: `VehicleType` (BOBTAIL, TRUCK_TRAILER), `SpotStatus` (AVAILABLE, OCCUPIED),
-`SessionStatus` (ACTIVE, COMPLETED, OVERSTAY), `PaymentType` (CHECKIN, MONTHLY_CHECKIN,
-EXTENSION, OVERSTAY), `AuditAction` (12 values including GATE_DENIED, SUSPICIOUS_ENTRY,
-ALLOWLIST_ENTRY).
+`SessionStatus` (ACTIVE, COMPLETED, OVERSTAY, CANCELLED), `PaymentType` (CHECKIN,
+MONTHLY_CHECKIN, MONTHLY_RENEWAL, EXTENSION, OVERSTAY), `AuditAction` (12 values
+including GATE_DENIED, SUSPICIOUS_ENTRY, ALLOWLIST_ENTRY).
 
 **Key models**:
-- `Driver` — phone (unique), name, email, qbCustomerId (QB link)
+- `Driver` — phone (unique), name, email, stripeCustomerId, stripePaymentMethodId
 - `Vehicle` — driverId FK, unitNumber, licensePlate, type, nickname
 - `Spot` — label (unique), type, status, cx/cy/w/h/rot (SVG layout)
 - `Session` — driverId, vehicleId, spotId, startedAt, expectedEnd, status,
-  termsVersion, overstayAuthorized
-- `Payment` — sessionId, type, externalPaymentId (QB invoice/charge ID), amount,
-  status (COMPLETED/REFUNDED/VOIDED/DISPUTED), refundedAmount, refundExternalId
+  billingStatus (CURRENT | PAYMENT_FAILED), termsVersion, overstayAuthorized
+- `Payment` — sessionId, type, stripeCheckoutSessionId, stripePaymentIntentId,
+  stripeChargeId, stripeSubscriptionId, stripeInvoiceId, qbSalesReceiptId,
+  legacyQbReference, days, amount, status (COMPLETED/REFUNDED/VOIDED/DISPUTED),
+  refundedAmount
+- `PaymentRefund` — paymentId, stripeRefundId, qbRefundReceiptId, amount
+- `StripeEvent` — deduplicate webhook events
 - `AuditLog` — action, sessionId?, driverId?, vehicleId?, spotId?, details
-- `Settings` — all config in one row (rates, terms, QB tokens, lotGroups JSON)
+- `Settings` — all config in one row (dailyRateBobtail, dailyRateTruck, rates, terms,
+  QB tokens, lotGroups JSON, stripeReconcileFlaggedIds, lastStripeWebhookAt,
+  lastStripeReconcileAt)
 - `AllowList` — phone (unique), name, label (Employee/Family/Vendor/Contractor), active
 
 ---
@@ -232,7 +241,10 @@ ALLOWLIST_ENTRY).
 - **Session status lifecycle**: ACTIVE → OVERSTAY (cron) → COMPLETED (exit/override)
 - **Shared types**: `src/types/domain.ts` — never define inline Driver/Vehicle/Session types in pages
 - **Phone numbers**: always use `<PhoneInput>` component, store digits-only in DB
-- **Payment IDs**: stored in `externalPaymentId` field (provider-agnostic, currently QB)
+- **Stripe identifiers**: stored as `stripeChargeId`, `stripePaymentIntentId`, `stripeSubscriptionId`,
+  `stripeInvoiceId` on Payment rows. QB: `qbSalesReceiptId` is the accounting mirror reference.
+- **QB is write-only accounting output.** Never route payment processing through QB.
+- **Pricing**: daily (1-30 days) and monthly (1-12 months) — never hourly
 - **Admin auth**: proxy.ts (Next.js 16 convention), JWT in httpOnly cookie
 - **Lot layout**: stored in DB (Spot.cx/cy/w/h/rot + Settings.lotGroups JSON), NOT localStorage
 - **Color theme**: forest green `#2D7A4A` primary accent, dark theme `#1C1C1E` on admin/entry/exit
@@ -245,17 +257,12 @@ ALLOWLIST_ENTRY).
 ### Before launch (critical path)
 1. **Shelly gate controller** — replace `triggerGateOpen()` stub in `src/lib/gate.ts`
    with HTTP call to WiFi relay
-2. **QuickBooks integration** — merge `quickbooks-payments` branch after QB developer
-   account is fully set up and tested. Needs:
-   - QB app redirect URI configured: `{BASE_URL}/api/admin/qb-auth/callback`
-   - Admin connects QB from Settings tab
-   - Test hosted checkout end-to-end with sandbox credentials
-3. **Cron scheduling** — Vercel Hobby allows daily cron only. Need external cron
+2. **Cron scheduling** — Vercel Hobby allows daily cron only. Need external cron
    (cron-job.org) or Railway for 5-minute intervals (overstay detection)
-4. **Environment variables on Vercel** — AUTH_SECRET (random 32+ chars),
-   NEXT_PUBLIC_BASE_URL (actual domain), QB credentials when ready
-5. **Terms text** — have a Texas attorney review the placeholder terms in Settings
-6. **Seed production lot** — run seed script with actual lot layout positions
+3. **Environment variables on Vercel** — AUTH_SECRET (random 32+ chars),
+   NEXT_PUBLIC_BASE_URL (actual domain), Stripe keys, QB credentials
+4. **Terms text** — have a Texas attorney review the placeholder terms in Settings
+5. **Seed production lot** — run seed script with actual lot layout positions
 
 ### Post-launch
 - SMS notifications (Twilio) — stubs ready in `src/lib/notifications.ts`
@@ -263,5 +270,5 @@ ALLOWLIST_ENTRY).
 - Hardware auth (Layer 3 — Shelly on private network)
 - Driver discount system (discount field on Driver model)
 - Reserved monthly spots (tie specific spots to monthly drivers)
-- Auto-renewal for monthly sessions
+- Subscription renewal monitoring
 - Railway migration (if Vercel cron limits are insufficient)

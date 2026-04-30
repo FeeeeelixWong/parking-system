@@ -147,7 +147,7 @@ function CheckInContent() {
       if (!savedPhone || !savedId) { router.replace("/entry"); return; }
 
       // Verify against API — only populate fields on confirmed match
-      apiFetch<{ driver: { id: string; name: string; email: string; phone: string } | null }>(
+      apiFetch<{ driver: { id: string; name: string; email: string | null; phone: string } | null }>(
         `/api/drivers?phone=${savedPhone}`
       )
         .then((data) => {

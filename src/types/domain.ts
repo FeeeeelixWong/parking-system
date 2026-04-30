@@ -26,7 +26,7 @@ export type { VehicleType, SessionStatus, BillingStatus, PaymentType, PaymentSta
 export type ApiDriver = {
   id: string;
   name: string;
-  email: string;
+  email: string | null;
   phone: string;
 };
 
@@ -243,7 +243,7 @@ export type LotSpotStatus = "VACANT" | "RESERVED" | "OVERDUE";
 /** Session info attached to a lot spot, with Date objects (not ISO strings). */
 export type LotSpotSession = {
   id: string;
-  driver: { name: string; email: string; phone: string };
+  driver: { name: string; email: string | null; phone: string };
   vehicle: {
     unitNumber: string | null;
     licensePlate: string | null;

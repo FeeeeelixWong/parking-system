@@ -13,7 +13,7 @@ export const PaymentTypeSchema = z.enum([
   "OVERSTAY",
 ]);
 export const PaymentStatusSchema = z.enum([
-  "PENDING", "COMPLETED", "PARTIALLY_REFUNDED", "REFUNDED", "CANCELLED", "DISPUTED",
+  "PENDING", "COMPLETED", "PARTIALLY_REFUNDED", "REFUNDED", "VOIDED", "DISPUTED",
 ]);
 export const AllowListLabelSchema = z.enum(["EMPLOYEE", "FAMILY", "VENDOR", "CONTRACTOR"]);
 
