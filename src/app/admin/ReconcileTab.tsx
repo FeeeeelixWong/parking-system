@@ -133,11 +133,32 @@ function StripeCell({ s, testMode }: { s: ReconcileSessionRow; testMode: boolean
       s.dbPaymentCount !== undefined &&
       s.stripeInvoiceCount > s.dbPaymentCount;
     const ok = charged === total && !webhookMiss;
-    return (
-      <span style={{ fontSize: 12, color: ok ? ACCENT : WARN }}>
-        {ok ? `${charged} / ${total} charged` : `${charged} / ${total} charged${webhookMiss ? ` · ${s.stripeInvoiceCount! - s.dbPaymentCount!} invoice${s.stripeInvoiceCount! - s.dbPaymentCount! > 1 ? "s" : ""} missing` : ""}`}
-      </span>
-    );
+    const subId = s.payments.find((p) => p.stripeSubscriptionId)?.stripeSubscriptionId;
+    const firstChargeId = s.payments.find((p) => p.stripeChargeId)?.stripeChargeId;
+    const firstPiId = s.payments.find((p) => p.stripePaymentIntentId)?.stripePaymentIntentId;
+    const href = subId
+      ? `${stripeDashBase(testMode)}/subscriptions/${subId}`
+      : firstChargeId
+      ? `${stripeDashBase(testMode)}/payments/${firstChargeId}`
+      : firstPiId
+      ? `${stripeDashBase(testMode)}/payments/${firstPiId}`
+      : null;
+    const label = ok
+      ? `${charged} / ${total} charged`
+      : `${charged} / ${total} charged${webhookMiss ? ` · ${s.stripeInvoiceCount! - s.dbPaymentCount!} invoice${s.stripeInvoiceCount! - s.dbPaymentCount! > 1 ? "s" : ""} missing` : ""}`;
+    if (href) {
+      return (
+        <a
+          href={href}
+          target="_blank" rel="noreferrer"
+          onClick={(e) => e.stopPropagation()}
+          style={{ fontSize: 12, color: ok ? STRIPE_PURPLE : WARN, textDecoration: "none" }}
+        >
+          {label} ↗
+        </a>
+      );
+    }
+    return <span style={{ fontSize: 12, color: ok ? STRIPE_PURPLE : WARN }}>{label}</span>;
   }
 
   // Single / few payments — show the first charge ID
@@ -181,11 +202,22 @@ function QBCell({ s, onRefresh }: { s: ReconcileSessionRow; onRefresh: () => voi
     const billed = s.payments.filter((p) => p.stripeChargeId);
     const withReceipt = billed.filter((p) => p.qbSalesReceiptId).length;
     const ok = withReceipt === billed.length && billed.length > 0;
-    return (
-      <span style={{ fontSize: 12, color: ok ? ACCENT : billed.length === 0 ? FG_DIM : WARN }}>
-        {billed.length === 0 ? "—" : `${withReceipt} / ${billed.length} receipts written`}
-      </span>
-    );
+    const label = billed.length === 0 ? "—" : `${withReceipt} / ${billed.length} receipts written`;
+    const color = ok ? ACCENT : billed.length === 0 ? FG_DIM : WARN;
+    const firstReceiptId = billed.find((p) => p.qbSalesReceiptId)?.qbSalesReceiptId;
+    if (firstReceiptId) {
+      return (
+        <a
+          href={qbReceiptUrl(firstReceiptId)}
+          target="_blank" rel="noreferrer"
+          onClick={(e) => e.stopPropagation()}
+          style={{ fontSize: 12, color, textDecoration: "none" }}
+        >
+          {label} ↗
+        </a>
+      );
+    }
+    return <span style={{ fontSize: 12, color }}>{label}</span>;
   }
 
   const p = s.payments[0];
@@ -507,12 +539,25 @@ function MainStripeCell({ s, testMode }: { s: ReconcileSessionRow; testMode: boo
     const total = s.payments.filter((p) => p.type === "MONTHLY_CHECKIN" || p.type === "MONTHLY_RENEWAL").length;
     const webhookMiss = s.stripeInvoiceCount !== undefined && s.dbPaymentCount !== undefined && s.stripeInvoiceCount > s.dbPaymentCount;
     const ok = charged === total && !webhookMiss;
-    return (
-      <span style={{ fontSize: 12, color: ok ? ACCENT : WARN }}>
-        {charged} / {total} charged
-        {webhookMiss && ` · ${s.stripeInvoiceCount! - s.dbPaymentCount!} invoice${s.stripeInvoiceCount! - s.dbPaymentCount! > 1 ? "s" : ""} missing`}
-      </span>
-    );
+    const subId = s.payments.find((p) => p.stripeSubscriptionId)?.stripeSubscriptionId;
+    const firstChargeId = s.payments.find((p) => p.stripeChargeId)?.stripeChargeId;
+    const firstPiId = s.payments.find((p) => p.stripePaymentIntentId)?.stripePaymentIntentId;
+    const href = subId
+      ? `${stripeDashBase(testMode)}/subscriptions/${subId}`
+      : firstChargeId
+      ? `${stripeDashBase(testMode)}/payments/${firstChargeId}`
+      : firstPiId
+      ? `${stripeDashBase(testMode)}/payments/${firstPiId}`
+      : null;
+    const label = `${charged} / ${total} charged${webhookMiss ? ` · ${s.stripeInvoiceCount! - s.dbPaymentCount!} invoice${s.stripeInvoiceCount! - s.dbPaymentCount! > 1 ? "s" : ""} missing` : ""}`;
+    if (href)
+      return (
+        <a href={href} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}
+          style={{ fontSize: 12, color: ok ? STRIPE_PURPLE : WARN, textDecoration: "none" }}>
+          {label} ↗
+        </a>
+      );
+    return <span style={{ fontSize: 12, color: ok ? STRIPE_PURPLE : WARN }}>{label}</span>;
   }
 
   const p = s.payments[0];
@@ -552,11 +597,18 @@ function MainQBCell({ s, onRefresh }: { s: ReconcileSessionRow; onRefresh: () =>
     const billed = s.payments.filter((p) => p.stripeChargeId);
     const withReceipt = billed.filter((p) => p.qbSalesReceiptId).length;
     const ok = withReceipt === billed.length && billed.length > 0;
-    return (
-      <span style={{ fontSize: 12, color: ok ? ACCENT : billed.length === 0 ? FG_DIM : WARN }}>
-        {billed.length === 0 ? "—" : `${withReceipt} / ${billed.length} receipts written`}
-      </span>
-    );
+    const label = billed.length === 0 ? "—" : `${withReceipt} / ${billed.length} receipts written`;
+    const color = ok ? ACCENT : billed.length === 0 ? FG_DIM : WARN;
+    const firstReceiptId = billed.find((p) => p.qbSalesReceiptId)?.qbSalesReceiptId;
+    if (firstReceiptId)
+      return (
+        <a href={qbReceiptUrl(firstReceiptId)} target="_blank" rel="noreferrer"
+          onClick={(e) => e.stopPropagation()}
+          style={{ fontSize: 12, color, textDecoration: "none" }}>
+          {label} ↗
+        </a>
+      );
+    return <span style={{ fontSize: 12, color }}>{label}</span>;
   }
 
   const p = s.payments[0];
@@ -602,7 +654,7 @@ const FILTERS: { key: HealthFilter; label: string }[] = [
   { key: "critical", label: "Critical only" },
 ];
 
-export default function ReconcileTab({ mobile }: { mobile: boolean }) {
+export default function ReconcileTab({ mobile, onHasIssues }: { mobile: boolean; onHasIssues?: (v: boolean) => void }) {
   const [sessions, setSessions] = useState<ReconcileSessionRow[]>([]);
   const [total, setTotal] = useState(0);
   const [hasMore, setHasMore] = useState(false);
@@ -617,6 +669,16 @@ export default function ReconcileTab({ mobile }: { mobile: boolean }) {
     fetch("/api/settings").then((r) => r.json()).then((s) => {
       if (typeof s.stripeTestMode === "boolean") setTestMode(s.stripeTestMode);
     }).catch(() => {});
+  }, []);
+
+  // Report issue presence to parent (only on first/unfiltered load)
+  useEffect(() => {
+    if (!onHasIssues) return;
+    fetch("/api/admin/reconcile?health=warning&limit=1")
+      .then((r) => r.json())
+      .then((d) => onHasIssues((d.total ?? 0) > 0))
+      .catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const load = useCallback(() => {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import ReconcileTab from "./ReconcileTab";
 import ChargesReceiptsTab from "./ChargesReceiptsTab";
 
@@ -9,6 +9,7 @@ const FG_MUTED = "#636366";
 const FG_DIM = "#8E8E93";
 const ACCENT = "#2D7A4A";
 const ACCENT_LIGHT = "#EDF7F1";
+const WARN_DOT = "#F59E0B";
 
 type SubTab = "sessions" | "charges-receipts";
 
@@ -17,11 +18,29 @@ const SUBTABS: { key: SubTab; label: string; description: string }[] = [
   { key: "charges-receipts",  label: "Charges & Receipts", description: "Stripe ↔ QuickBooks" },
 ];
 
+function IssueDot() {
+  return (
+    <span style={{
+      width: 7, height: 7,
+      borderRadius: "50%",
+      background: WARN_DOT,
+      display: "inline-block",
+      flexShrink: 0,
+      marginLeft: 5,
+      verticalAlign: "middle",
+    }} />
+  );
+}
+
 export default function ReconcileView({ mobile }: { mobile: boolean }) {
   const [subTab, setSubTab] = useState<SubTab>("sessions");
+  const [issueMap, setIssueMap] = useState<Partial<Record<SubTab, boolean>>>({});
+
+  const setIssues = useCallback((key: SubTab, v: boolean) => {
+    setIssueMap((prev) => prev[key] === v ? prev : { ...prev, [key]: v });
+  }, []);
 
   if (mobile) {
-    // Mobile: horizontal top bar, same as before
     return (
       <div>
         <div style={{
@@ -47,15 +66,18 @@ export default function ReconcileView({ mobile }: { mobile: boolean }) {
                   borderBottom: active ? `2px solid ${ACCENT}` : "2px solid transparent",
                   cursor: "pointer",
                   marginBottom: -1,
+                  display: "flex",
+                  alignItems: "center",
                 }}
               >
                 {label}
+                {issueMap[key] && <IssueDot />}
               </button>
             );
           })}
         </div>
-        {subTab === "sessions"         && <ReconcileTab mobile />}
-        {subTab === "charges-receipts" && <ChargesReceiptsTab mobile />}
+        {subTab === "sessions"         && <ReconcileTab mobile onHasIssues={(v) => setIssues("sessions", v)} />}
+        {subTab === "charges-receipts" && <ChargesReceiptsTab mobile onHasIssues={(v) => setIssues("charges-receipts", v)} />}
       </div>
     );
   }
@@ -107,8 +129,11 @@ export default function ReconcileView({ mobile }: { mobile: boolean }) {
                 fontWeight: active ? 700 : 500,
                 color: active ? ACCENT : FG_MUTED,
                 lineHeight: 1.3,
+                display: "flex",
+                alignItems: "center",
               }}>
                 {label}
+                {issueMap[key] && <IssueDot />}
               </div>
               <div style={{
                 fontSize: 11,
@@ -125,8 +150,8 @@ export default function ReconcileView({ mobile }: { mobile: boolean }) {
 
       {/* Content */}
       <div style={{ flex: 1, minWidth: 0 }}>
-        {subTab === "sessions"         && <ReconcileTab mobile={false} />}
-        {subTab === "charges-receipts" && <ChargesReceiptsTab mobile={false} />}
+        {subTab === "sessions"         && <ReconcileTab mobile={false} onHasIssues={(v) => setIssues("sessions", v)} />}
+        {subTab === "charges-receipts" && <ChargesReceiptsTab mobile={false} onHasIssues={(v) => setIssues("charges-receipts", v)} />}
       </div>
 
     </div>

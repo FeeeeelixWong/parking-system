@@ -293,7 +293,7 @@ function PairRow({ left, right, warn, idx }: { left: React.ReactNode; right: Rea
 // ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
-export default function ChargesReceiptsTab({ mobile }: { mobile: boolean }) {
+export default function ChargesReceiptsTab({ mobile, onHasIssues }: { mobile: boolean; onHasIssues?: (v: boolean) => void }) {
   const [data, setData] = useState<ChargesReceiptsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -312,10 +312,19 @@ export default function ChargesReceiptsTab({ mobile }: { mobile: boolean }) {
       .then((r) => r.json())
       .then((d) => {
         if (d.error) { setError(d.error); setData(null); }
-        else setData(d);
+        else {
+          setData(d);
+          onHasIssues?.(
+            (d.orphanedCharges?.length ?? 0) +
+            (d.orphanedReceipts?.length ?? 0) +
+            (d.orphanedRefunds?.length ?? 0) +
+            (d.orphanedRefundReceipts?.length ?? 0) > 0
+          );
+        }
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => { load(); }, [load]);

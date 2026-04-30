@@ -6,6 +6,7 @@ import type { ApiSpotWithSessions, ApiAuditEntry, AppSettings, SpotLayout, LotSp
 import { apiFetch, apiPost } from "@/lib/fetch";
 import { deriveLotStatus } from "@/lib/lot-status";
 import { useIsMobile } from "@/lib/hooks";
+import { timeRemaining } from "@/lib/time";
 import LotMapViewer, { countStatuses } from "@/components/lot/LotMapViewer";
 import { useEditorReducer } from "@/components/lot/editor/useEditorReducer";
 import SpotDetailPanel from "@/app/lot/SpotDetailPanel";
@@ -228,6 +229,7 @@ export default function AdminDashboard() {
   const [paymentsInitialSearch, setPaymentsInitialSearch] = useState("");
   const [overrideSpotId, setOverrideSpotId] = useState<string | null>(null);
   const [overrideReason, setOverrideReason] = useState("");
+  const [reconcileHasIssues, setReconcileHasIssues] = useState(false);
 
   // Read ?tab and ?q URL params on mount so deep-links (e.g. "View in Payments") work
   useEffect(() => {
@@ -240,6 +242,13 @@ export default function AdminDashboard() {
     const q = params.get("q");
     if (q) setPaymentsInitialSearch(q);
     if (t || q) window.history.replaceState({}, "", window.location.pathname);
+  }, []);
+
+  useEffect(() => {
+    fetch("/api/admin/reconcile?health=warning&limit=1")
+      .then((r) => r.json())
+      .then((d) => setReconcileHasIssues((d.total ?? 0) > 0))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -674,7 +683,19 @@ export default function AdminDashboard() {
                 letterSpacing: "0.02em",
               }}
             >
-              {t.label}
+              <span style={{ position: "relative", display: "inline-flex", alignItems: "center", gap: 5 }}>
+                {t.label}
+                {t.key === "reconcile" && reconcileHasIssues && (
+                  <span style={{
+                    width: 7, height: 7,
+                    borderRadius: "50%",
+                    background: "#F59E0B",
+                    display: "inline-block",
+                    flexShrink: 0,
+                    marginBottom: 1,
+                  }} />
+                )}
+              </span>
             </button>
           ))}
         </div>
@@ -839,7 +860,11 @@ export default function AdminDashboard() {
                           {!mobile && (
                             <div style={{ minWidth: 0 }}>
                               <div style={{ fontSize: 12, color: FG_MUTED }}>{fmtDate(s.startedAt)}</div>
-                              <div style={{ fontSize: 11, color: FG_DIM }}>{calcDuration(s.startedAt, s.endedAt)}</div>
+                              <div style={{ fontSize: 11, color: FG_DIM }}>
+                                {s.status === "ACTIVE"
+                                  ? `${timeRemaining(s.expectedEnd)} left`
+                                  : calcDuration(s.startedAt, s.endedAt)}
+                              </div>
                             </div>
                           )}
 
@@ -904,6 +929,9 @@ export default function AdminDashboard() {
                                 <DetailCol title="Timing">
                                   <DetailRow label="Started" value={fmtDate(s.startedAt)} />
                                   <DetailRow label="Expected end" value={fmtDate(s.expectedEnd)} />
+                                  {s.status === "ACTIVE" && (
+                                    <DetailRow label="Remaining" value={timeRemaining(s.expectedEnd)} />
+                                  )}
                                   <DetailRow label="Ended" value={fmtDate(s.endedAt)} />
                                   <DetailRow label="Duration" value={calcDuration(s.startedAt, s.endedAt)} />
                                   {isMonthlySession && (
