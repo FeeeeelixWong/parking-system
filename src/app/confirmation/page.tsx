@@ -63,9 +63,11 @@ function ConfirmationContent() {
       router.replace("/entry");
       return;
     }
-    setDriverId(saved.id);
-
-    apiFetch<{ session: SessionData | null; activeSessions: SessionData[] }>(`/api/sessions?driverId=${saved.id}`)
+    Promise.resolve(saved.id)
+      .then((id) => {
+        setDriverId(id);
+        return apiFetch<{ session: SessionData | null; activeSessions: SessionData[] }>(`/api/sessions?driverId=${id}`);
+      })
       .then((d) => {
         const target = sessionIdParam
           ? d.activeSessions.find(s => s.id === sessionIdParam) ?? d.session
@@ -79,7 +81,7 @@ function ConfirmationContent() {
       .catch(() => {
         setError("Could not load session details.");
       });
-  }, []);
+  }, [router, sessionIdParam]);
 
   if (error) {
     return (

@@ -156,7 +156,7 @@ function RefundCell({
 // Receipt cell (right column — charges section)
 // ---------------------------------------------------------------------------
 function ReceiptCell({
-  receipt, payment, orphan, testMode,
+  receipt, orphan, testMode,
 }: {
   receipt: ReceiptItem; payment: PaymentRef | null; orphan?: boolean; testMode: boolean;
 }) {

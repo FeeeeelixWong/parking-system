@@ -105,14 +105,6 @@ function roadDijkstra(fromId: string, toId: string): [number, number][] {
   return path.map(k => ROAD[k]);
 }
 
-/** Total Euclidean distance along a Dijkstra road path. */
-function roadTotalDist(fromId: string, toId: string): number {
-  const pts = roadDijkstra(fromId, toId);
-  let d = 0;
-  for (let i = 1; i < pts.length; i++) d += dist2d(pts[i - 1], pts[i]);
-  return d;
-}
-
 /** Closest point on segment [a,b] to point p. */
 function closestOnSeg(
   p: [number, number],

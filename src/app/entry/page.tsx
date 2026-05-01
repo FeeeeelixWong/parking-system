@@ -102,60 +102,64 @@ export default function ScanPage() {
   useEffect(() => {
     const saved = loadDriver();
     if (!saved) {
-      setState("ask_type");
+      Promise.resolve().then(() => setState("ask_type"));
       return;
     }
-    setState("checking");
 
     const digits = saved.phone.replace(/\D/g, "");
 
     // Check allow list first — if on it, gate opens immediately
-    checkAllowList(digits).then((allowed) => {
-      if (allowed) return;
+    Promise.resolve()
+      .then(() => { setState("checking"); return checkAllowList(digits); })
+      .then((allowed) => {
+        if (allowed) return;
 
-      // Not on allow list — check as a regular driver
-      apiFetch<DriverResponse>(`/api/drivers?phone=${digits}`)
-        .then((data) => {
-          if (data.driver?.id === saved.id) {
-            resolveDriver(data.driver, data.activeSessions ?? []);
-          } else {
+        // Not on allow list — check as a regular driver
+        apiFetch<DriverResponse>(`/api/drivers?phone=${digits}`)
+          .then((data) => {
+            if (data.driver?.id === saved.id) {
+              resolveDriver(data.driver, data.activeSessions ?? []);
+            } else {
+              clearDriver();
+              setState("ask_type");
+            }
+          })
+          .catch(() => {
             clearDriver();
             setState("ask_type");
-          }
-        })
-        .catch(() => {
-          clearDriver();
-          setState("ask_type");
-        });
-    });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+          });
+      });
   }, []);
 
   // Auto-trigger gate for allow list entries
   useEffect(() => {
     if (state !== "allowlist" || gateTriggered) return;
     if (!freshScan.current) {
-      setGateDenied(true);
+      Promise.resolve().then(() => setGateDenied(true));
       return;
     }
-    setGateTriggered(true);
-    apiPost("/api/gate", {
-      allowListPhone: phone.replace(/\D/g, "") || loadDriver()?.phone?.replace(/\D/g, ""),
-      deviceId: getDeviceId(),
-      direction: "ENTRANCE",
-    }).catch(() => {});
+    Promise.resolve().then(() => {
+      setGateTriggered(true);
+      apiPost("/api/gate", {
+        allowListPhone: phone.replace(/\D/g, "") || loadDriver()?.phone?.replace(/\D/g, ""),
+        deviceId: getDeviceId(),
+        direction: "ENTRANCE",
+      }).catch(() => {});
+    });
   }, [state, gateTriggered, phone]);
 
   // Auto-trigger gate when entering gate_active — only on fresh external scan
   useEffect(() => {
     if (state !== "gate_active" || gateTriggered) return;
     if (!freshScan.current) {
-      setGateDenied(true);
+      Promise.resolve().then(() => setGateDenied(true));
       return;
     }
-    setGateTriggered(true);
-    apiPost("/api/gate", { driverId: driver?.id, sessionId: session?.id, deviceId: getDeviceId(), direction: "ENTRANCE" })
-      .catch(() => {});
+    Promise.resolve().then(() => {
+      setGateTriggered(true);
+      apiPost("/api/gate", { driverId: driver?.id, sessionId: session?.id, deviceId: getDeviceId(), direction: "ENTRANCE" })
+        .catch(() => {});
+    });
   }, [state, gateTriggered, driver, session]);
 
   useEffect(() => {

@@ -10,7 +10,7 @@ import { useToast } from "@/app/admin/ToastContext";
 const BG = "#FAFAFA";
 const CARD_BG = "#FFFFFF";
 const BORDER = "#E5E5EA";
-const BORDER_DARK = "#D1D5DB";
+
 const FG = "#1C1C1E";
 const FG_MUTED = "#636366";
 const FG_DIM = "#8E8E93";
@@ -117,146 +117,6 @@ function ActionBtn({
 }
 
 // ---------------------------------------------------------------------------
-// Stripe / QB cell renderers for main table
-// ---------------------------------------------------------------------------
-function StripeCell({ s, testMode }: { s: ReconcileSessionRow; testMode: boolean }) {
-  if (s.payments.length === 0) {
-    return <span style={{ color: ERR, fontSize: 12 }}>No payments</span>;
-  }
-
-  if (s.sessionType === "MONTHLY") {
-    const charged = s.payments.filter((p) => p.stripeChargeId || p.stripePaymentIntentId).length;
-    const total = s.payments.filter((p) => p.type === "MONTHLY_CHECKIN" || p.type === "MONTHLY_RENEWAL").length;
-    // Also flag webhook miss if stripeInvoiceCount > dbPaymentCount
-    const webhookMiss =
-      s.stripeInvoiceCount !== undefined &&
-      s.dbPaymentCount !== undefined &&
-      s.stripeInvoiceCount > s.dbPaymentCount;
-    const ok = charged === total && !webhookMiss;
-    const subId = s.payments.find((p) => p.stripeSubscriptionId)?.stripeSubscriptionId;
-    const firstChargeId = s.payments.find((p) => p.stripeChargeId)?.stripeChargeId;
-    const firstPiId = s.payments.find((p) => p.stripePaymentIntentId)?.stripePaymentIntentId;
-    const href = subId
-      ? `${stripeDashBase(testMode)}/subscriptions/${subId}`
-      : firstChargeId
-      ? `${stripeDashBase(testMode)}/payments/${firstChargeId}`
-      : firstPiId
-      ? `${stripeDashBase(testMode)}/payments/${firstPiId}`
-      : null;
-    const label = ok
-      ? `${charged} / ${total} charged`
-      : `${charged} / ${total} charged${webhookMiss ? ` · ${s.stripeInvoiceCount! - s.dbPaymentCount!} invoice${s.stripeInvoiceCount! - s.dbPaymentCount! > 1 ? "s" : ""} missing` : ""}`;
-    if (href) {
-      return (
-        <a
-          href={href}
-          target="_blank" rel="noreferrer"
-          onClick={(e) => e.stopPropagation()}
-          style={{ fontSize: 12, color: ok ? STRIPE_PURPLE : WARN, textDecoration: "none" }}
-        >
-          {label} ↗
-        </a>
-      );
-    }
-    return <span style={{ fontSize: 12, color: ok ? STRIPE_PURPLE : WARN }}>{label}</span>;
-  }
-
-  // Single / few payments — show the first charge ID
-  const p = s.payments[0];
-  if (p?.stripeChargeId) {
-    return (
-      <a
-        href={`${stripeDashBase(testMode)}/payments/${p.stripeChargeId}`}
-        target="_blank"
-        rel="noreferrer"
-        onClick={(e) => e.stopPropagation()}
-        style={{ ...MONO, color: STRIPE_PURPLE, textDecoration: "none" }}
-      >
-        {p.stripeChargeId.slice(0, 18)}… ↗
-      </a>
-    );
-  }
-  if (p?.stripePaymentIntentId) {
-    return (
-      <a
-        href={`${stripeDashBase(testMode)}/payments/${p.stripePaymentIntentId}`}
-        target="_blank"
-        rel="noreferrer"
-        onClick={(e) => e.stopPropagation()}
-        style={{ ...MONO, color: STRIPE_PURPLE, textDecoration: "none" }}
-      >
-        {p.stripePaymentIntentId.slice(0, 16)}… ↗
-      </a>
-    );
-  }
-  return <span style={{ fontSize: 12, color: ERR }}>No charge recorded</span>;
-}
-
-function QBCell({ s, onRefresh }: { s: ReconcileSessionRow; onRefresh: () => void }) {
-  const [writeState, setWriteState] = useState<WriteState>("idle");
-  const { addToast } = useToast();
-
-  if (s.payments.length === 0) return <span style={{ color: FG_DIM, fontSize: 12 }}>—</span>;
-
-  if (s.sessionType === "MONTHLY") {
-    const billed = s.payments.filter((p) => p.stripeChargeId);
-    const withReceipt = billed.filter((p) => p.qbSalesReceiptId).length;
-    const ok = withReceipt === billed.length && billed.length > 0;
-    const label = billed.length === 0 ? "—" : `${withReceipt} / ${billed.length} receipts written`;
-    const color = ok ? ACCENT : billed.length === 0 ? FG_DIM : WARN;
-    const firstReceiptId = billed.find((p) => p.qbSalesReceiptId)?.qbSalesReceiptId;
-    if (firstReceiptId) {
-      return (
-        <a
-          href={qbReceiptUrl(firstReceiptId)}
-          target="_blank" rel="noreferrer"
-          onClick={(e) => e.stopPropagation()}
-          style={{ fontSize: 12, color, textDecoration: "none" }}
-        >
-          {label} ↗
-        </a>
-      );
-    }
-    return <span style={{ fontSize: 12, color }}>{label}</span>;
-  }
-
-  const p = s.payments[0];
-  if (!p) return <span style={{ color: FG_DIM, fontSize: 12 }}>—</span>;
-
-  if (p.qbSalesReceiptId) {
-    return (
-      <a href={qbReceiptUrl(p.qbSalesReceiptId)} target="_blank" rel="noreferrer"
-        style={{ fontSize: 12, color: ACCENT, textDecoration: "none" }}>
-        Receipt written ↗
-      </a>
-    );
-  }
-  if (!p.stripeChargeId) return <span style={{ color: FG_DIM, fontSize: 12 }}>—</span>;
-
-  async function doWrite(e?: React.MouseEvent) {
-    e?.stopPropagation?.();
-    setWriteState("pending");
-    const res = await fetch(`/api/admin/payments/${p!.id}/sync-receipt`, { method: "POST" });
-    const data = await res.json().catch(() => ({}));
-    if (res.ok) {
-      setWriteState("success");
-      addToast({ type: "success", message: "QB Sales Receipt written" });
-      onRefresh();
-    } else {
-      setWriteState("error");
-      addToast({ type: "error", message: `QB write failed · ${data.error ?? "Unknown error"}` });
-    }
-  }
-
-  return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-      {writeState === "idle" && <span style={{ fontSize: 12, color: WARN }}>Missing</span>}
-      <ActionBtn label="Write Receipt" state={writeState} onTrigger={doWrite} />
-    </span>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // Drill-down: detailed ledger table for one session
 // ---------------------------------------------------------------------------
 function LedgerTable({
@@ -268,9 +128,6 @@ function LedgerTable({
   testMode: boolean;
   onRefresh: () => void;
 }) {
-  const isMonthly = session.sessionType === "MONTHLY";
-  const subId = session.payments.find((p) => p.stripeSubscriptionId)?.stripeSubscriptionId;
-
   const thStyle: React.CSSProperties = {
     padding: "8px 10px",
     textAlign: "left",
@@ -337,7 +194,7 @@ function LedgerTable({
                     onRefresh={onRefresh}
                   />,
                   // Refund sub-rows
-                  ...p.refunds.map((r, ri) => (
+                  ...p.refunds.map((r) => (
                     <RefundLedgerRow
                       key={r.id}
                       refund={r}

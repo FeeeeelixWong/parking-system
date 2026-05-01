@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useCallback, useMemo } from "react";
+import React, { useState, useCallback, useEffect, useMemo } from "react";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -410,6 +410,7 @@ export default function LotMap({ spots, onSpotClick, selectedSpotId, labelOverri
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
+  const [editorScreenPos, setEditorScreenPos] = useState<{ x: number; y: number } | null>(null);
   const svgRef = React.useRef<SVGSVGElement>(null);
 
   const suggestMap = useMemo(() => {
@@ -465,6 +466,27 @@ export default function LotMap({ spots, onSpotClick, selectedSpotId, labelOverri
   const hoveredLayout = hoveredId ? CAD_SPOTS.find((s) => s.id === hoveredId) : null;
   const hoveredData = hoveredLayout ? getSpotData(hoveredLayout) : null;
   const editingLayout = editingId ? CAD_SPOTS.find((s) => s.id === editingId) : null;
+
+  // Compute screen coordinates for the floating label editor outside of render
+  useEffect(() => {
+    Promise.resolve().then(() => {
+      if (!editingLayout || !svgRef.current) {
+        setEditorScreenPos(null);
+        return;
+      }
+      const svg = svgRef.current;
+      const pt = svg.createSVGPoint();
+      pt.x = editingLayout.cx;
+      pt.y = editingLayout.cy;
+      const ctm = svg.getScreenCTM();
+      if (!ctm) {
+        setEditorScreenPos(null);
+        return;
+      }
+      const screenPt = pt.matrixTransform(ctm);
+      setEditorScreenPos({ x: screenPt.x, y: screenPt.y });
+    });
+  }, [editingId, editingLayout]);
 
   return (
     <div style={{ width: "100%", fontFamily: "var(--font-body, 'DM Sans', sans-serif)" }}>
@@ -590,7 +612,7 @@ export default function LotMap({ spots, onSpotClick, selectedSpotId, labelOverri
         {hoveredLayout && hoveredData && (() => {
           const ttW = 160;
           const ttH = hoveredData.status === "OCCUPIED" ? (hoveredData.driverName ? 72 : 56) : 42;
-          let tx = Math.max(4, Math.min(1000 - ttW - 4, hoveredLayout.cx - ttW / 2));
+          const tx = Math.max(4, Math.min(1000 - ttW - 4, hoveredLayout.cx - ttW / 2));
           let ty = hoveredLayout.cy - hoveredLayout.h / 2 - ttH - 8;
           if (ty < 4) ty = hoveredLayout.cy + hoveredLayout.h / 2 + 8;
 
@@ -635,51 +657,39 @@ export default function LotMap({ spots, onSpotClick, selectedSpotId, labelOverri
       </svg>
 
       {/* ── Floating label editor (HTML overlay) ── */}
-      {editingLayout && svgRef.current && (() => {
-        // Convert SVG coords to screen coords
-        const svg = svgRef.current;
-        const pt = svg.createSVGPoint();
-        pt.x = editingLayout.cx;
-        pt.y = editingLayout.cy;
-        const ctm = svg.getScreenCTM();
-        if (!ctm) return null;
-        const screenPt = pt.matrixTransform(ctm);
-        const svgRect = svg.getBoundingClientRect();
-
-        return (
-          <input
-            autoFocus
-            type="text"
-            value={editValue}
-            onChange={(e) => setEditValue(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") commitEdit();
-              if (e.key === "Escape") { setEditingId(null); setEditValue(""); }
-            }}
-            onBlur={commitEdit}
-            style={{
-              position: "fixed",
-              left: screenPt.x - 40,
-              top: screenPt.y - 14,
-              width: 80,
-              height: 28,
-              fontSize: 14,
-              fontFamily: "var(--font-display, 'Barlow Condensed', sans-serif)",
-              fontWeight: 700,
-              textAlign: "center",
-              textTransform: "uppercase",
-              letterSpacing: "0.05em",
-              border: "2px solid #FFA000",
-              borderRadius: 6,
-              background: "#FFF8E1",
-              color: "#1A1A1A",
-              outline: "none",
-              boxShadow: "0 2px 12px rgba(0,0,0,0.15)",
-              zIndex: 9999,
-            }}
-          />
-        );
-      })()}
+      {editingLayout && editorScreenPos && (
+        <input
+          autoFocus
+          type="text"
+          value={editValue}
+          onChange={(e) => setEditValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commitEdit();
+            if (e.key === "Escape") { setEditingId(null); setEditValue(""); }
+          }}
+          onBlur={commitEdit}
+          style={{
+            position: "fixed",
+            left: editorScreenPos.x - 40,
+            top: editorScreenPos.y - 14,
+            width: 80,
+            height: 28,
+            fontSize: 14,
+            fontFamily: "var(--font-display, 'Barlow Condensed', sans-serif)",
+            fontWeight: 700,
+            textAlign: "center",
+            textTransform: "uppercase",
+            letterSpacing: "0.05em",
+            border: "2px solid #FFA000",
+            borderRadius: 6,
+            background: "#FFF8E1",
+            color: "#1A1A1A",
+            outline: "none",
+            boxShadow: "0 2px 12px rgba(0,0,0,0.15)",
+            zIndex: 9999,
+          }}
+        />
+      )}
     </div>
   );
 }

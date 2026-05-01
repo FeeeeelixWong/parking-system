@@ -9,8 +9,6 @@ import {
   writeSalesReceiptSafe,
   vehicleTypeLabel,
   plateSuffix,
-  type CheckoutMetadata,
-  type SessionPurpose,
 } from "@/lib/stripe-checkout-service";
 
 /**

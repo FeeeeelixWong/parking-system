@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 
 import { loadDriver } from "@/lib/driver-store";
-import { apiFetch, apiPost } from "@/lib/fetch";
+import { apiFetch } from "@/lib/fetch";
 
 export default function ExtendPage() {
   return (
@@ -48,11 +48,12 @@ function ExtendContent() {
   useEffect(() => {
     const saved = loadDriver();
     if (!saved) {
-      setLoadError("Driver identity not found. Please check in again.");
-      setLoading(false);
+      Promise.resolve().then(() => {
+        setLoadError("Driver identity not found. Please check in again.");
+        setLoading(false);
+      });
       return;
     }
-    setDriverId(saved.id);
 
     Promise.all([
       apiFetch<{
@@ -71,6 +72,7 @@ function ExtendContent() {
       ),
     ])
       .then(([sessionData, settingsData]) => {
+        setDriverId(saved.id);
         if (sessionData.session) {
           if (sessionData.session.status === "OVERSTAY") {
             router.replace(`/exit`);

@@ -179,7 +179,7 @@ same session → `SUSPICIOUS_ENTRY` logged.
 | `/api/admin/spots/override` | POST | Manager override to free a spot |
 | `/api/admin/allowlist` | GET, POST, PUT, DELETE | Allow list CRUD |
 | `/api/admin/reconcile` | GET | Session/payment chain health checks |
-| `/api/admin/stripe-reconcile` | POST | Stripe-vs-DB divergence check |
+| `/api/admin/reconcile/stripe-db` | POST | Stripe-vs-DB divergence check |
 | `/api/admin/reconcile/charges-receipts` | GET | Charges vs QB receipts reconciliation |
 | `/api/cron/check-sessions` | GET | Expiry reminders, OVERSTAY detection, manager alerts |
 | `/api/dev/seed` | POST | Seed test data (dev only) |

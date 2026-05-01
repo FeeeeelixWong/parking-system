@@ -4,7 +4,7 @@ import { getSettings } from "@/lib/settings";
 import { triggerGateOpen } from "@/lib/gate";
 import { log as audit } from "@/lib/audit";
 import { overstayRate, ceilDays } from "@/lib/rates";
-import { handler, json, notFound, conflict } from "@/lib/api-handler";
+import { handler, json, notFound } from "@/lib/api-handler";
 import { SessionExitSchema } from "@/lib/schemas";
 
 /**

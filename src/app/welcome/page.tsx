@@ -48,6 +48,8 @@ function WelcomeContent() {
   const searchParams = useSearchParams();
   const driverId = searchParams.get("driverId");
 
+  const [now] = useState(() => Date.now());
+
   const [driverName, setDriverName] = useState("");
   const [sessions, setSessions] = useState<ActiveSession[]>([]);
   const [loading, setLoading] = useState(true);
@@ -62,12 +64,11 @@ function WelcomeContent() {
     }
 
     const saved = loadDriver();
-    if (saved) {
-      setDriverName(saved.name || "");
-    }
+    const savedName = saved?.name || "";
 
     apiFetch<{ activeSessions: ActiveSession[] }>(`/api/sessions?driverId=${driverId}`)
       .then((d) => {
+        setDriverName(savedName);
         setSessions(d.activeSessions || []);
         setLoading(false);
       })
@@ -83,7 +84,7 @@ function WelcomeContent() {
   function isOverstayed(session: ActiveSession) {
     // Use status as primary signal; fall back to time-check to catch
     // sessions that are past expectedEnd but haven't been marked by cron yet
-    return session.status === "OVERSTAY" || new Date(session.expectedEnd).getTime() < Date.now();
+    return session.status === "OVERSTAY" || new Date(session.expectedEnd).getTime() < now;
   }
 
   async function handleOpenGate(session: ActiveSession) {

@@ -63,12 +63,28 @@ function PaymentCompleteContent() {
 
   useEffect(() => {
     if (!cs) {
-      setUi({ kind: "error", message: "Missing checkout reference in URL." });
+      Promise.resolve().then(() =>
+        setUi({ kind: "error", message: "Missing checkout reference in URL." })
+      );
       return;
     }
 
     const start = Date.now();
     cancelledRef.current = false;
+
+    function handleReady(data: LookupResponse) {
+      const { payment, session } = data;
+      let target: string;
+      if (payment.type === "OVERSTAY" && session) {
+        target = `/exit?paid=1&sessionId=${session.id}`;
+      } else if (session) {
+        target = `/welcome?driverId=${session.driverId}`;
+      } else {
+        target = "/entry";
+      }
+      setUi({ kind: "redirecting", target });
+      router.replace(target);
+    }
 
     const poll = async () => {
       if (cancelledRef.current) return;
@@ -101,21 +117,7 @@ function PaymentCompleteContent() {
     return () => {
       cancelledRef.current = true;
     };
-  }, [cs]);
-
-  function handleReady(data: LookupResponse) {
-    const { payment, session } = data;
-    let target: string;
-    if (payment.type === "OVERSTAY" && session) {
-      target = `/exit?paid=1&sessionId=${session.id}`;
-    } else if (session) {
-      target = `/welcome?driverId=${session.driverId}`;
-    } else {
-      target = "/entry";
-    }
-    setUi({ kind: "redirecting", target });
-    router.replace(target);
-  }
+  }, [cs, router]);
 
   return (
     <div
