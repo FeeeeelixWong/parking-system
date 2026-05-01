@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 
-import type { ApiSpotWithSessions, ApiAuditEntry, AppSettings, SpotLayout, LotSpotStatus, LotSpotDetail, ApiPaymentWithSession } from "@/types/domain";
+import type { ApiSpotWithSessions, ApiAuditEntry, AppSettings, SpotLayout, LotSpotStatus, LotSpotDetail } from "@/types/domain";
 import { apiFetch, apiPost } from "@/lib/fetch";
 import { deriveLotStatus } from "@/lib/lot-status";
 import { useIsMobile } from "@/lib/hooks";
@@ -114,63 +114,6 @@ function sumPayments(payments: { amount: number; refundedAmount: number }[]): nu
   return payments.reduce((s, p) => s + Math.max(0, p.amount - p.refundedAmount), 0);
 }
 
-/**
- * Generate deep-links into QuickBooks for various entity types.
- * Returns null for free/test payments that don't exist in QB.
- */
-// Use sandbox QB dashboard links in dev/test; production links in prod.
-// process.env.NODE_ENV is inlined by Next.js at build time — safe client-side.
-const QB_BASE = process.env.NODE_ENV !== "production"
-  ? "https://app.sandbox.qbo.intuit.com"
-  : "https://app.qbo.intuit.com";
-
-const qbLinks = {
-  invoice: (id: string) => `${QB_BASE}/app/invoice?txnId=${id}`,
-  payment: (id: string) => `${QB_BASE}/app/recvpayment?txnId=${id}`,
-  salesReceipt: (id: string) => `${QB_BASE}/app/salesreceipt?txnId=${id}`,
-  customer: (id: string) => `${QB_BASE}/app/customerdetail?nameId=${id}`,
-  refundReceipt: (id: string) => `${QB_BASE}/app/refundreceipt?txnId=${id}`,
-  creditMemo: (customerId: string) => `${QB_BASE}/app/creditmemo/create?customerId=${customerId}`,
-  dashboard: () => `${QB_BASE}/app/homepage`,
-};
-
-// Stripe dashboard deep links. Uses the live dashboard; for test mode the
-// URL pattern is the same but the route is /test/... — harmless in practice
-// because Stripe serves the right mode based on the API key used.
-const STRIPE_DASHBOARD = "https://dashboard.stripe.com";
-const stripeLinks = {
-  paymentIntent: (id: string) => `${STRIPE_DASHBOARD}/payments/${id}`,
-  charge: (id: string) => `${STRIPE_DASHBOARD}/payments/${id}`,
-  customer: (id: string) => `${STRIPE_DASHBOARD}/customers/${id}`,
-  subscription: (id: string) => `${STRIPE_DASHBOARD}/subscriptions/${id}`,
-  refund: (id: string) => `${STRIPE_DASHBOARD}/refunds/${id}`,
-};
-
-/**
- * A "real" payment is one where actual money moved — either through Stripe
- * (any stripe* ID present) or via a legacy QB invoice/charge. Rows flagged
- * `free_*` in legacyQbReference are payments-disabled dev sessions.
- */
-type PaymentRowRefs = {
-  stripePaymentIntentId: string | null;
-  stripeChargeId: string | null;
-  stripeSubscriptionId: string | null;
-  legacyQbReference: string | null;
-};
-function isRealPayment(p: PaymentRowRefs): boolean {
-  if (p.stripePaymentIntentId || p.stripeChargeId || p.stripeSubscriptionId) return true;
-  const legacy = p.legacyQbReference;
-  return !!(legacy && !legacy.startsWith("free_") && !legacy.startsWith("dev_seed_"));
-}
-
-/** Canonical Stripe deep link for a payment row, if any Stripe IDs are set. */
-function stripeDashboardUrl(p: PaymentRowRefs, testMode = false): string | null {
-  const base = testMode ? "https://dashboard.stripe.com/test" : "https://dashboard.stripe.com";
-  if (p.stripePaymentIntentId) return `${base}/payments/${p.stripePaymentIntentId}`;
-  if (p.stripeChargeId) return `${base}/payments/${p.stripeChargeId}`;
-  if (p.stripeSubscriptionId) return `${base}/subscriptions/${p.stripeSubscriptionId}`;
-  return null;
-}
 
 // ---------------------------------------------------------------------------
 // Shared inline style constants — light theme
@@ -228,8 +171,6 @@ export default function AdminDashboard() {
   const [settingsForm, setSettingsForm] = useState<Settings | null>(null);
   const [tab, setTab] = useState<"overview" | "sessions" | "payments" | "reconcile" | "drivers" | "log" | "settings">("overview");
   const [paymentsInitialSearch, setPaymentsInitialSearch] = useState("");
-  const [overrideSpotId, setOverrideSpotId] = useState<string | null>(null);
-  const [overrideReason, setOverrideReason] = useState("");
   const [reconcileHasIssues, setReconcileHasIssues] = useState(false);
 
   // Read ?tab and ?q URL params on mount so deep-links (e.g. "View in Payments") work
@@ -283,20 +224,6 @@ export default function AdminDashboard() {
   const [editErrors, setEditErrors] = useState<{ name?: string; email?: string; phone?: string }>({});
   const DRIVERS_LIMIT = 30;
 
-  // ── Toast notifications (money-movement events) ──
-  type AdminToast = { id: number; message: string; status: "success" | "error" };
-  const [toasts, setToasts] = useState<AdminToast[]>([]);
-  function pushToast(message: string, status: "success" | "error") {
-    const id = Date.now();
-    setToasts(prev => [...prev, { id, message, status }]);
-    if (status === "success") {
-      setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 5000);
-    }
-  }
-  function dismissToast(id: number) {
-    setToasts(prev => prev.filter(t => t.id !== id));
-  }
-
   // ── Session actions state ──
   const [manageSession, setManageSession] = useState<SessionRow | null>(null);
 
@@ -324,9 +251,6 @@ export default function AdminDashboard() {
   const [nsForm, setNsForm] = useState<NsForm>(NS_DEFAULT);
   const [nsErrors, setNsErrors] = useState<Record<string, string>>({});
   const [nsSubmitting, setNsSubmitting] = useState(false);
-  type InvoiceVerify = { status: "idle" | "checking" | "ok" | "error"; message: string };
-  const [nsInvoice, setNsInvoice] = useState<InvoiceVerify>({ status: "idle", message: "" });
-
   // ── Overview / lot map state ──
   const editor = useEditorReducer();
   const allSpots = useMemo<SpotLayout[]>(
@@ -390,7 +314,6 @@ export default function AdminDashboard() {
       })
       .catch(() => setSessionsData(null))
       .finally(() => setSessionsLoading(false));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessQueryStr]);
 
   const driversQueryStr = useMemo(() => {
@@ -511,17 +434,6 @@ export default function AdminDashboard() {
     window.open("https://developer.intuit.com/app/developer/sandbox", "_blank");
   }
 
-  async function handleOverride(spotId: string) {
-    if (!overrideReason.trim()) { alert("Provide a reason for the override."); return; }
-    const res = await fetch("/api/admin/spots/override", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ spotId, action: "free", reason: overrideReason }),
-    });
-    if (res.ok) { setOverrideSpotId(null); setOverrideReason(""); loadData(); loadSessions(); }
-    else { const d = await res.json(); alert(d.error || "Override failed"); }
-  }
-
   async function handleSaveSettings(e: React.FormEvent) {
     e.preventDefault();
     if (!settingsForm) return;
@@ -542,31 +454,7 @@ export default function AdminDashboard() {
   // ── New session handlers ────────────────────────────────────────────────
   function nsSetField<K extends keyof NsForm>(k: K, v: NsForm[K]) {
     setNsForm((f) => ({ ...f, [k]: v }));
-    if (k === "stripeId") setNsInvoice({ status: "idle", message: "" });
     setNsErrors((e) => { const next = { ...e }; delete next[k]; return next; });
-  }
-
-  async function handleVerifyInvoice() {
-    const id = nsForm.stripeId.trim();
-    if (!id) return;
-    setNsInvoice({ status: "checking", message: "" });
-    try {
-      const data = await apiFetch<{
-        paid: boolean; voided: boolean; partial: boolean;
-        totalAmount: number; amountPaid: number;
-      }>(`/api/payments/status?invoiceId=${encodeURIComponent(id)}`);
-      if (data.voided) {
-        setNsInvoice({ status: "error", message: "Invoice was voided" });
-      } else if (data.partial) {
-        setNsInvoice({ status: "error", message: `Partial only — $${data.amountPaid.toFixed(2)} of $${data.totalAmount.toFixed(2)}` });
-      } else if (data.paid) {
-        setNsInvoice({ status: "ok", message: `Paid — $${data.totalAmount.toFixed(2)}` });
-      } else {
-        setNsInvoice({ status: "error", message: "Invoice not yet paid in QB" });
-      }
-    } catch {
-      setNsInvoice({ status: "error", message: "Could not verify — check the invoice ID" });
-    }
   }
 
   const nsPaymentRequired = settingsForm?.paymentRequired ?? true;
@@ -584,7 +472,6 @@ export default function AdminDashboard() {
     // Invoice only required when payments are enabled
     if (nsPaymentRequired) {
       if (!nsForm.stripeId.trim()) errs.stripeId = "Required";
-      else if (nsInvoice.status !== "ok") errs.stripeId = "Must be verified before submitting";
     }
     setNsErrors(errs);
     return Object.keys(errs).length === 0;
@@ -611,7 +498,6 @@ export default function AdminDashboard() {
       });
       setNsOpen(false);
       setNsForm(NS_DEFAULT);
-      setNsInvoice({ status: "idle", message: "" });
       loadSessions();
     } catch (err) {
       setNsErrors({ _: err instanceof Error ? err.message : "Something went wrong" });
@@ -781,7 +667,7 @@ export default function AdminDashboard() {
               </div>
 
               <button
-                onClick={() => { setNsForm(NS_DEFAULT); setNsErrors({}); setNsInvoice({ status: "idle", message: "" }); setNsOpen(true); }}
+                onClick={() => { setNsForm(NS_DEFAULT); setNsErrors({}); setNsOpen(true); }}
                 style={{ padding: "8px 16px", background: ACCENT, color: "#fff", border: "none", borderRadius: 8, fontWeight: 700, fontSize: 13, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0 }}
               >
                 + New Session
@@ -1637,39 +1523,7 @@ export default function AdminDashboard() {
       />
     )}
 
-    {/* Toast notifications — top-right, money-movement events */}
-    <div style={{ position: "fixed", top: 16, right: 16, zIndex: 9999, display: "flex", flexDirection: "column", gap: 8, pointerEvents: "none" }}>
-      {toasts.map(t => (
-        <div
-          key={t.id}
-          style={{
-            pointerEvents: "all",
-            background: t.status === "success" ? "#14532D" : "#7F1D1D",
-            border: `1px solid ${t.status === "success" ? "#16A34A" : "#DC2626"}`,
-            color: "#fff",
-            borderRadius: 10,
-            padding: "12px 14px",
-            maxWidth: 380,
-            display: "flex",
-            gap: 10,
-            alignItems: "flex-start",
-            boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
-            animation: "slideInRight 0.2s ease",
-          }}
-        >
-          <span style={{ fontSize: 16, lineHeight: 1, flexShrink: 0 }}>{t.status === "success" ? "✓" : "⚠"}</span>
-          <span style={{ flex: 1, fontSize: 13, lineHeight: 1.45 }}>{t.message}</span>
-          <button
-            onClick={() => dismissToast(t.id)}
-            style={{ background: "none", border: "none", color: "rgba(255,255,255,0.6)", cursor: "pointer", fontSize: 16, lineHeight: 1, padding: 0, flexShrink: 0 }}
-          >
-            ✕
-          </button>
-        </div>
-      ))}
-    </div>
-    <style>{`@keyframes slideInRight { from { transform: translateX(32px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }`}</style>
-    </>
+</>
     </ToastProvider>
   );
 }
