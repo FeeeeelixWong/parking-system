@@ -26,7 +26,7 @@ export type { VehicleType, SessionStatus, BillingStatus, PaymentType, PaymentSta
 export type ApiDriver = {
   id: string;
   name: string;
-  email: string;
+  email: string | null;
   phone: string;
 };
 
@@ -197,7 +197,7 @@ export type AppSettings = {
 };
 
 // ---------------------------------------------------------------------------
-// Overstay (returned by POST /api/sessions/exit when payment required)
+// Overstay (used by exit page and overstay-checkout command endpoint)
 // ---------------------------------------------------------------------------
 
 export type OverstayInfo = {
@@ -243,7 +243,7 @@ export type LotSpotStatus = "VACANT" | "RESERVED" | "OVERDUE";
 /** Session info attached to a lot spot, with Date objects (not ISO strings). */
 export type LotSpotSession = {
   id: string;
-  driver: { name: string; email: string; phone: string };
+  driver: { name: string; email: string | null; phone: string };
   vehicle: {
     unitNumber: string | null;
     licensePlate: string | null;
@@ -279,3 +279,15 @@ export const LOT_STATUS_COLORS: Record<LotSpotStatus, LotSpotColors> = {
   RESERVED: { fill: "#1A1A2E", fillHover: "#24244A", stroke: "#6366F1", label: "rgba(99,102,241,0.7)" },
   OVERDUE:  { fill: "#2C1810", fillHover: "#3D2218", stroke: "#DC2626", label: "rgba(220,38,38,0.7)" },
 };
+
+// ---------------------------------------------------------------------------
+// Action/denial types (re-exported from actions.ts for single-import convenience)
+// ---------------------------------------------------------------------------
+export type {
+  ActionCode,
+  ActionState,
+  TypedDenial,
+  DenialCodeType,
+  AdminMutationResult,
+} from "./actions";
+export { DenialCode } from "./actions";

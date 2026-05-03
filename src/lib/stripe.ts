@@ -91,7 +91,7 @@ type CheckoutMetadata = {
   vehicleId?: string;
   sessionPurpose: "CHECKIN" | "MONTHLY_CHECKIN" | "EXTENSION" | "OVERSTAY";
   sessionId?: string;
-  hours?: string;
+  days?: string;
   months?: string;
   termsVersion?: string;
   overstayAuthorized?: string;
@@ -183,12 +183,11 @@ export async function createSubscriptionCheckoutSession(args: {
       },
     ],
     // Reinforce the end date in smaller print below the Subscribe button.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     custom_text: {
       submit: {
         message: `This subscription ends on ${endDateStr} and will not renew after that date.`,
       },
-    } as any,
+    } as Stripe.Checkout.SessionCreateParams["custom_text"],
     // Echo metadata onto the Subscription object itself so future renewals
     // (which fire invoice.payment_succeeded with a subscription ref) can look
     // up the original driver/vehicle without re-reading Checkout.

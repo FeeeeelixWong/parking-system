@@ -13,7 +13,7 @@ export const PaymentTypeSchema = z.enum([
   "OVERSTAY",
 ]);
 export const PaymentStatusSchema = z.enum([
-  "PENDING", "COMPLETED", "PARTIALLY_REFUNDED", "REFUNDED", "CANCELLED", "DISPUTED",
+  "PENDING", "COMPLETED", "PARTIALLY_REFUNDED", "REFUNDED", "VOIDED", "DISPUTED",
 ]);
 export const AllowListLabelSchema = z.enum(["EMPLOYEE", "FAMILY", "VENDOR", "CONTRACTOR"]);
 
@@ -86,43 +86,22 @@ export const SessionCreateSchema = z
   );
 export type SessionCreateInput = z.infer<typeof SessionCreateSchema>;
 
-export const SessionExtendSchema = z.object({
-  sessionId: idSchema,
-  driverId: idSchema,
-  days: z.number().int().min(1).max(30),
-  paymentId: z.string().min(1).max(200),
-});
-
-export const SessionExitSchema = z.object({
-  sessionId: idSchema,
-  driverId: idSchema,
-  overstayPaymentId: z.string().min(1).max(200).optional(),
-});
-
 // ---------------------------------------------------------------------------
 // Payment — Stripe Checkout
 // ---------------------------------------------------------------------------
 
 /**
  * Body for POST /api/payments/checkout — creates a Stripe Checkout session
- * in either payment mode (one-time) or subscription mode (monthly). Echoes
- * the metadata back on the webhook so the handler knows how to wire the
- * resulting Payment row to a Session.
+ * for initial check-in only (one-time or monthly subscription). Extension and
+ * overstay checkouts are created through the session command endpoints.
  */
 export const CheckoutCreateSchema = z.object({
   driverId: idSchema,
-  sessionPurpose: z.enum(["CHECKIN", "MONTHLY_CHECKIN", "EXTENSION", "OVERSTAY"]),
-  // Required for CHECKIN / MONTHLY_CHECKIN — identifies the vehicle that
-  // will hold the spot.
+  sessionPurpose: z.enum(["CHECKIN", "MONTHLY_CHECKIN"]),
   vehicleId: idSchema.optional(),
-  // Required for EXTENSION / OVERSTAY — identifies the existing session.
-  sessionId: idSchema.optional(),
-  // Amount and description are computed server-side from settings rates —
-  // never accepted from the client to prevent price tampering.
   days: z.number().int().min(1).max(365).optional(),
   months: z.number().int().min(1).max(12).optional(),
   termsVersion: z.string().min(1).max(50).optional(),
-  overstayAuthorized: z.boolean().optional(),
 });
 export type CheckoutCreateInput = z.infer<typeof CheckoutCreateSchema>;
 
@@ -208,3 +187,30 @@ export const SessionHistoryQuerySchema = z.object({
   q: z.string().trim().max(120).optional(),
 });
 export type SessionHistoryQuery = z.infer<typeof SessionHistoryQuerySchema>;
+
+// ---------------------------------------------------------------------------
+// Driver state query
+// ---------------------------------------------------------------------------
+export const DriverStateQuerySchema = z.object({
+  phone: phoneSchema,
+});
+export type DriverStateQuery = z.infer<typeof DriverStateQuerySchema>;
+
+// ---------------------------------------------------------------------------
+// Pricing preview query
+// ---------------------------------------------------------------------------
+export const PricingPreviewQuerySchema = z.object({
+  vehicleType: VehicleTypeSchema,
+  durationType: z.enum(["DAILY", "MONTHLY"]),
+  days: z.coerce.number().int().min(1).max(30).optional(),
+  months: z.coerce.number().int().min(1).max(12).optional(),
+})
+  .refine(
+    (d) => d.durationType !== "DAILY" || d.days !== undefined,
+    { message: "days required for DAILY pricing" },
+  )
+  .refine(
+    (d) => d.durationType !== "MONTHLY" || d.months !== undefined,
+    { message: "months required for MONTHLY pricing" },
+  );
+export type PricingPreviewQuery = z.infer<typeof PricingPreviewQuerySchema>;

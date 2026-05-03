@@ -214,7 +214,7 @@ export default function SpotDetailPanel({ detail, onClose, open, mobile }: Props
             <Section title="Driver">
               <Row label="Name" value={detail.session.driver.name} />
               <Row label="Phone" value={detail.session.driver.phone} />
-              <Row label="Email" value={detail.session.driver.email} />
+              <Row label="Email" value={detail.session.driver.email ?? "—"} />
             </Section>
 
             {/* Vehicle */}

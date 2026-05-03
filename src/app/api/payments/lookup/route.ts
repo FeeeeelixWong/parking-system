@@ -2,7 +2,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { handler, json } from "@/lib/api-handler";
 import { getStripe } from "@/lib/stripe";
-import { processCheckoutSession } from "@/app/api/stripe/webhook/route";
+import { processCheckoutSession } from "@/lib/stripe-checkout-service";
 
 const LookupQuery = z.object({
   cs: z.string().min(1).max(200),

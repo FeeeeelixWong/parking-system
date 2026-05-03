@@ -140,9 +140,9 @@ function LotPage() {
 
   useEffect(() => {
     if (!demoPathLength) return;
-    setDashOffset(demoPathLength);
+    const initTimer = setTimeout(() => setDashOffset(demoPathLength), 0);
     animRef.current = setTimeout(() => setDashOffset(0), 150);
-    return () => { if (animRef.current) clearTimeout(animRef.current); };
+    return () => { clearTimeout(initTimer); if (animRef.current) clearTimeout(animRef.current); };
   }, [demoPathLength]);
 
   // Pulse counter for the assigned spot rings

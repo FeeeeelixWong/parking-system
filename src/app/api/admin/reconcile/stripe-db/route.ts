@@ -4,7 +4,7 @@ import { listRecentCharges, stripeConfigured } from "@/lib/stripe";
 import { handler, json, conflict } from "@/lib/api-handler";
 
 /**
- * POST /api/admin/stripe-reconcile — read-only divergence check.
+ * POST /api/admin/reconcile/stripe-db — read-only divergence check.
  *
  * Unlike the old QB reconciliation (which wrote state back from QB to our
  * DB), this endpoint NEVER mutates Payment rows. The webhook is the only

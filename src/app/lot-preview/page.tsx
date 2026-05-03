@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import LotMap from "@/components/lot/LotMap";
 import { computeSuggestions, DEFAULT_LABELS } from "@/components/lot/LotMap";
 import type { LabelSuggestion } from "@/components/lot/LotMap";
@@ -22,14 +22,10 @@ function saveLabels(labels: Record<string, string>) {
 }
 
 export default function LotPreviewPage() {
-  const [labels, setLabels] = useState<Record<string, string>>({});
+  const [labels, setLabels] = useState<Record<string, string>>(loadLabels);
   const [selected, setSelected] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [suggestions, setSuggestions] = useState<LabelSuggestion[]>([]);
-
-  useEffect(() => {
-    setLabels(loadLabels());
-  }, []);
 
   function handleLabelChange(spotId: string, newLabel: string) {
     const next = { ...labels, [spotId]: newLabel };

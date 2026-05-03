@@ -100,13 +100,42 @@ function CheckInContent() {
   const isLocked = searchParams.get("locked") === "true";
   const isNew = searchParams.get("new") === "true";
 
-  const [name, setName] = useState("");
+  const [name, setName] = useState(() => {
+    if (existingDriverId && !isDemo && typeof window !== "undefined") {
+      const saved = loadDriver();
+      return saved?.name || "";
+    }
+    return "";
+  });
   const [email, setEmail] = useState(isDemo ? "demo@example.com" : "");
-  const [phone, setPhone] = useState(isDemo ? "555-0100" : "");
+  const [phone, setPhone] = useState(() => {
+    if (isDemo) return "555-0100";
+    if (existingDriverId && typeof window !== "undefined") {
+      const saved = loadDriver();
+      return saved?.phone || "";
+    }
+    return searchParams.get("prefillPhone") ?? "";
+  });
   const [days, setDays] = useState(1);
   const [months, setMonths] = useState(1);
-  const [durationType, setDurationType] = useState<DurationType>("DAILY");
-  const [settings, setSettings] = useState<Settings | null>(null);
+  const [_durationType, setDurationType] = useState<DurationType>("DAILY");
+  const [settings, setSettings] = useState<Settings | null>(
+    isDemo
+      ? {
+          dailyRateBobtail: 30,
+          dailyRateTruck: 30,
+          monthlyRateBobtail: 250,
+          monthlyRateTruck: 400,
+          overstayRateBobtail: 20,
+          overstayRateTruck: 25,
+          paymentRequired: false,
+          bobtailOverflow: true,
+          termsVersion: "demo",
+          termsBody: "Demo mode — no terms acceptance required.",
+          gracePeriodMinutes: 15,
+        }
+      : null,
+  );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -146,15 +175,17 @@ function CheckInContent() {
       const savedId = saved.id;
       if (!savedPhone || !savedId) { router.replace("/entry"); return; }
 
-      // Verify against API — only populate fields on confirmed match
-      apiFetch<{ driver: { id: string; name: string; email: string; phone: string } | null }>(
-        `/api/drivers?phone=${savedPhone}`
+      // Verify against API — only populate fields on confirmed match; also grab availability
+      apiFetch<{ driver: { id: string; name: string; email: string | null; phone: string } | null; availability: { bobtailFree: number; truckFree: number } }>(
+        `/api/driver/state?phone=${savedPhone}`
       )
         .then((data) => {
           if (data.driver?.id === savedId) {
             setName(data.driver.name || "");
             setEmail(data.driver.email || "");
             setPhone(data.driver.phone || "");
+            setAvailableBobtail(data.availability.bobtailFree);
+            setAvailableTruck(data.availability.truckFree);
           } else {
             clearDriver();
             router.replace("/entry");
@@ -167,12 +198,8 @@ function CheckInContent() {
       return;
     }
 
-    // URL param prefill (from scan → not_found → new driver with phone carried over)
-    const urlPhone = searchParams.get("prefillPhone");
-    if (urlPhone) {
-      setPhone(urlPhone);
-    }
     // No localStorage prefill for unverified state
+    // prefillPhone is handled by the useState initializer above
   }, [existingDriverId, isDemo, isLocked, router, searchParams]);
 
   useEffect(() => {
@@ -187,36 +214,32 @@ function CheckInContent() {
       apiFetch<{ settings: Settings }>("/api/settings")
         .then((d) => setSettings(d.settings))
         .catch(() => setError("Could not load rates. Please refresh the page."));
-    } else {
-      setSettings({
-        dailyRateBobtail: 30,
-        dailyRateTruck: 30,
-        monthlyRateBobtail: 250,
-        monthlyRateTruck: 400,
-        overstayRateBobtail: 20,
-        overstayRateTruck: 25,
-        paymentRequired: false,
-        bobtailOverflow: true,
-        termsVersion: "demo",
-        termsBody: "Demo mode — no terms acceptance required.",
-        gracePeriodMinutes: 15,
-      });
     }
+    // Demo settings are initialized in useState above
 
-    // Check spot availability — warn if the lot is full before the driver fills out the form.
-    // /api/spots returns each spot with its ACTIVE/OVERSTAY sessions; no sessions = free.
-    if (!isDemo) {
-      apiFetch<{ spots: { type: string; sessions: unknown[] }[] }>("/api/spots")
-        .then((d) => {
-          const isFree = (s: { sessions: unknown[] }) => s.sessions.length === 0;
-          const bobtail = d.spots.filter((s) => s.type === "BOBTAIL" && isFree(s)).length;
-          const truck = d.spots.filter((s) => s.type === "TRUCK_TRAILER" && isFree(s)).length;
-          setAvailableBobtail(bobtail);
-          setAvailableTruck(truck);
-        })
-        .catch(() => {
-          // Silently fail — driver will see the error on submit if there's actually a problem
-        });
+    // Check spot availability — skip when existingDriverId is set (that block fetches availability
+    // alongside vehicles). Use driver state when we have a phone; fall back to GET /api/spots for
+    // brand-new drivers who haven't entered a phone yet.
+    if (!isDemo && !existingDriverId) {
+      const savedPhone = loadDriver()?.phone?.replace(/\D/g, "");
+      if (savedPhone) {
+        apiFetch<{ availability: { bobtailFree: number; truckFree: number } }>(
+          `/api/driver/state?phone=${savedPhone}`
+        )
+          .then((d) => {
+            setAvailableBobtail(d.availability.bobtailFree);
+            setAvailableTruck(d.availability.truckFree);
+          })
+          .catch(() => {});
+      } else {
+        apiFetch<{ spots: { type: string; sessions: unknown[] }[] }>("/api/spots")
+          .then((d) => {
+            const isFree = (s: { sessions: unknown[] }) => s.sessions.length === 0;
+            setAvailableBobtail(d.spots.filter((s) => s.type === "BOBTAIL" && isFree(s)).length);
+            setAvailableTruck(d.spots.filter((s) => s.type === "TRUCK_TRAILER" && isFree(s)).length);
+          })
+          .catch(() => {});
+      }
     }
 
     // Locked mode: wait until phone is populated by the verified API response,
@@ -241,16 +264,12 @@ function CheckInContent() {
     }
 
     if (existingDriverId) {
-      const saved = loadDriver();
-      if (saved) {
-        setName(saved.name || "");
-        if (!isDemo) {
-          setPhone(saved.phone || "");
-        }
-      }
+      // name and phone are initialized from localStorage in useState initializers above
 
       if (!isDemo) {
-        apiFetch<{ vehicles: Vehicle[] }>(`/api/vehicles?driverId=${existingDriverId}`)
+        // Fetch vehicles and availability in parallel
+        const savedPhone = loadDriver()?.phone?.replace(/\D/g, "");
+        const fetchVehicles = apiFetch<{ vehicles: Vehicle[] }>(`/api/vehicles?driverId=${existingDriverId}`)
           .then((d) => {
             if (d.vehicles?.length) {
               setVehicles(d.vehicles);
@@ -260,23 +279,31 @@ function CheckInContent() {
             }
           })
           .catch(() => setAddingVehicle(true));
+
+        if (savedPhone) {
+          Promise.all([
+            fetchVehicles,
+            apiFetch<{ availability: { bobtailFree: number; truckFree: number } }>(
+              `/api/driver/state?phone=${savedPhone}`
+            ).then((d) => {
+              setAvailableBobtail(d.availability.bobtailFree);
+              setAvailableTruck(d.availability.truckFree);
+            }).catch(() => {}),
+          ]);
+        }
       } else {
-        setAddingVehicle(true);
+        Promise.resolve().then(() => setAddingVehicle(true));
       }
     } else {
-      setAddingVehicle(true);
+      Promise.resolve().then(() => setAddingVehicle(true));
     }
   }, [existingDriverId, isDemo, isLocked, phone]);
 
   const selectedVehicle = vehicles.find((v) => v.id === selectedVehicleId);
   const vehicleType = selectedVehicle?.type || newVehicleType;
 
-  // Monthly is truck/trailer only — reset if bobtail is selected while on monthly
-  useEffect(() => {
-    if (vehicleType === "BOBTAIL" && durationType === "MONTHLY") {
-      setDurationType("DAILY");
-    }
-  }, [vehicleType, durationType]);
+  // Monthly is truck/trailer only — compute durationType so bobtail always falls back to DAILY
+  const durationType: DurationType = _durationType === "MONTHLY" && vehicleType === "BOBTAIL" ? "DAILY" : _durationType;
 
   // Effective spot availability for the selected vehicle type
   // Bobtails can use truck spots if overflow is enabled
@@ -435,7 +462,6 @@ function CheckInContent() {
             days: durationType === "DAILY" ? days : undefined,
             months: durationType === "MONTHLY" ? months : undefined,
             termsVersion: settings.termsVersion,
-            overstayAuthorized: true,
           }),
         });
         const checkoutData = await checkoutRes.json();

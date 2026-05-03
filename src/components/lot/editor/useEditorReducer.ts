@@ -4,7 +4,7 @@
 
 import { useReducer, useCallback, useState, useMemo, useEffect } from "react";
 import type { EditorSpot, SpotGroup, EditorState, EditorAction } from "./types";
-import { computeGroupSpacing, computeNewSpotPosition, getGroupTemplate, snapToGrid } from "./geometry";
+import { computeNewSpotPosition, getGroupTemplate, snapToGrid } from "./geometry";
 import { findOverlaps, wouldOverlap } from "./validation";
 import defaultData from "./defaultState.json";
 

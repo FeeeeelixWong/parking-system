@@ -1,17 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 
 export default function Home() {
-  const [entryUrl, setEntryUrl] = useState("");
-  const [exitUrl, setExitUrl] = useState("");
-  useEffect(() => {
-    const origin = window.location.origin;
-    setEntryUrl(`${origin}/entry`);
-    setExitUrl(`${origin}/exit`);
-  }, []);
+  const [entryUrl] = useState(() =>
+    typeof window !== "undefined" ? `${window.location.origin}/entry` : ""
+  );
+  const [exitUrl] = useState(() =>
+    typeof window !== "undefined" ? `${window.location.origin}/exit` : ""
+  );
 
   return (
     <div

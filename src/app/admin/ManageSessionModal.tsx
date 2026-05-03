@@ -13,7 +13,7 @@ type SessionRow = {
   expectedEnd: string;
   status: "ACTIVE" | "COMPLETED" | "OVERSTAY" | "CANCELLED";
   billingStatus: "CURRENT" | "PAYMENT_FAILED" | "DELINQUENT";
-  driver: { id: string; name: string; email: string; phone: string };
+  driver: { id: string; name: string; email: string | null; phone: string };
   vehicle: {
     id: string;
     unitNumber: string | null;

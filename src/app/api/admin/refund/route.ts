@@ -4,7 +4,7 @@ import { refundPaymentIntent, stripeConfigured, getStripe } from "@/lib/stripe";
 import { log as audit } from "@/lib/audit";
 import { handler, json, notFound, conflict } from "@/lib/api-handler";
 import { AdminRefundSchema } from "@/lib/schemas";
-import { processChargeRefund } from "@/app/api/stripe/webhook/route";
+import { processChargeRefund } from "@/lib/stripe-checkout-service";
 
 /**
  * POST /api/admin/refund — admin-initiated Stripe refund.
