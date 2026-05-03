@@ -5,7 +5,8 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 
 import { loadDriver } from "@/lib/driver-store";
-import { apiFetch } from "@/lib/fetch";
+import { apiFetch, apiPost } from "@/lib/fetch";
+import type { ActionState } from "@/types/domain";
 
 export default function ExtendPage() {
   return (
@@ -29,6 +30,15 @@ function formatDateTime(date: Date) {
   );
 }
 
+type DriverStateSession = {
+  id: string;
+  status: "ACTIVE" | "OVERSTAY";
+  expectedEnd: string;
+  spot: { label: string; type: string };
+  vehicle: { id: string; type: string; licensePlate: string | null; nickname: string | null };
+  isMonthly: boolean;
+};
+
 function ExtendContent() {
   const router = useRouter();
 
@@ -44,6 +54,7 @@ function ExtendContent() {
   const [isMonthly, setIsMonthly] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [allowedExtend, setAllowedExtend] = useState<ActionState | null>(null);
 
   useEffect(() => {
     const saved = loadDriver();
@@ -55,46 +66,63 @@ function ExtendContent() {
       return;
     }
 
-    Promise.all([
-      apiFetch<{
-        session: {
-          id: string;
-          status: string;
-          expectedEnd: string;
-          vehicle?: { type: string };
-          spot?: { label: string };
-          driver?: { name: string };
-          payments?: { type: string }[];
-        } | null;
-      }>(`/api/sessions?driverId=${saved.id}`),
-      apiFetch<{ settings: { dailyRateBobtail: number; dailyRateTruck: number } }>(
-        "/api/settings"
-      ),
-    ])
-      .then(([sessionData, settingsData]) => {
-        setDriverId(saved.id);
-        if (sessionData.session) {
-          if (sessionData.session.status === "OVERSTAY") {
-            router.replace(`/exit`);
-            return;
-          }
-          if (sessionData.session.payments?.some((p) => p.type === "MONTHLY_CHECKIN")) {
-            setIsMonthly(true);
-            setLoading(false);
-            return;
-          }
-          setSessionId(sessionData.session.id);
-          setCurrentEnd(new Date(sessionData.session.expectedEnd));
-          setSpotLabel(sessionData.session.spot?.label ?? "");
-          setDriverName(sessionData.session.driver?.name ?? "");
-          const rate =
-            sessionData.session.vehicle?.type === "BOBTAIL"
-              ? settingsData.settings.dailyRateBobtail
-              : settingsData.settings.dailyRateTruck;
-          setDailyRate(rate);
-        } else {
-          setLoadError("No active session found.");
+    const phone = saved.phone ?? "";
+    if (!phone) {
+      Promise.resolve().then(() => {
+        setLoadError("No phone on file. Please check in again.");
+        setLoading(false);
+      });
+      return;
+    }
+
+    apiFetch<{
+      driver: { id: string; name: string } | null;
+      activeSessions: DriverStateSession[];
+      allowedActions: ActionState[];
+    }>(`/api/driver/state?phone=${encodeURIComponent(phone)}`)
+      .then(async (state) => {
+        if (!state.driver) {
+          setLoadError("Driver not found. Please check in again.");
+          setLoading(false);
+          return;
         }
+
+        setDriverId(state.driver.id);
+        setDriverName(state.driver.name);
+
+        const activeSession = state.activeSessions[0];
+
+        if (!activeSession) {
+          setLoadError("No active session found.");
+          setLoading(false);
+          return;
+        }
+
+        if (activeSession.status === "OVERSTAY") {
+          router.replace("/exit");
+          return;
+        }
+
+        if (activeSession.isMonthly) {
+          setIsMonthly(true);
+          setLoading(false);
+          return;
+        }
+
+        const extendAction = state.allowedActions.find(
+          (a) => a.code === "REQUEST_EXTENSION_CHECKOUT",
+        ) ?? null;
+        setAllowedExtend(extendAction);
+
+        setSessionId(activeSession.id);
+        setCurrentEnd(new Date(activeSession.expectedEnd));
+        setSpotLabel(activeSession.spot.label);
+
+        // Fetch daily rate from pricing preview (1 day = the per-day rate)
+        const preview = await apiFetch<{ ok: boolean; result?: { rate: number } }>(
+          `/api/pricing/preview?vehicleType=${activeSession.vehicle.type}&durationType=DAILY&days=1`,
+        );
+        setDailyRate(preview.result?.rate ?? 0);
         setLoading(false);
       })
       .catch(() => {
@@ -115,26 +143,17 @@ function ExtendContent() {
     setError("");
 
     try {
-      // Redirect to Stripe Checkout. The webhook (handleExtension) updates
-      // the session expectedEnd and writes the Payment row; /payment-complete
-      // then redirects to /welcome.
-      const checkoutRes = await fetch("/api/payments/checkout", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          driverId,
-          sessionId,
-          sessionPurpose: "EXTENSION",
-          days,
-        }),
-      });
-      const checkoutData = await checkoutRes.json();
-      if (!checkoutRes.ok || !checkoutData.checkoutUrl) {
-        setError(checkoutData.error ?? "Could not start payment. Please try again.");
+      const result = await apiPost<
+        | { ok: true; result: { checkoutUrl: string } }
+        | { ok: false; denial: { message: string } }
+      >(`/api/sessions/${sessionId}/request-extension-checkout`, { driverId, days });
+
+      if (!result.ok) {
+        setError(result.denial.message);
         setSubmitting(false);
         return;
       }
-      window.location.href = checkoutData.checkoutUrl;
+      window.location.href = result.result.checkoutUrl;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong. Please try again.");
       setSubmitting(false);
@@ -212,6 +231,7 @@ function ExtendContent() {
   }
 
   const firstName = driverName ? driverName.split(" ")[0] : null;
+  const extendDisabled = allowedExtend !== null && !allowedExtend.enabled;
 
   return (
     <div
@@ -253,6 +273,12 @@ function ExtendContent() {
             {firstName ? `Add more time, ${firstName}` : "Add more time"}
           </h1>
         </div>
+
+        {extendDisabled && allowedExtend?.reason && (
+          <div style={{ padding: "12px 16px", background: "#FEF3C7", border: "1px solid #D97706", borderRadius: 10, marginBottom: 20, fontSize: 14, color: "#92400E" }}>
+            {allowedExtend.reason}
+          </div>
+        )}
 
         {/* Current session context */}
         <div
@@ -323,7 +349,7 @@ function ExtendContent() {
           )}
         </div>
 
-        {/* Hour stepper */}
+        {/* Day stepper */}
         <div
           style={{
             background: "var(--input-bg)",
@@ -495,17 +521,17 @@ function ExtendContent() {
         <form onSubmit={handleExtend}>
           <button
             type="submit"
-            disabled={submitting}
+            disabled={submitting || extendDisabled}
             style={{
               width: "100%",
               padding: "17px 24px",
-              background: submitting ? "var(--fg-subtle)" : "var(--accent)",
+              background: submitting || extendDisabled ? "var(--fg-subtle)" : "var(--accent)",
               color: "#fff",
               border: "none",
               borderRadius: 12,
               fontWeight: 700,
               fontSize: 17,
-              cursor: submitting ? "default" : "pointer",
+              cursor: submitting || extendDisabled ? "default" : "pointer",
               fontFamily: "var(--font-display)",
               letterSpacing: "0.02em",
               transition: "background 0.15s",

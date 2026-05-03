@@ -60,3 +60,13 @@ export function addMonths(base: Date, months: number): Date {
   result.setMonth(result.getMonth() + months);
   return result;
 }
+
+/** Compute the overstay fee preview given a session and current settings. */
+export function computeOverstayFee(
+  session: { expectedEnd: Date; vehicle: { type: string } },
+  settings: RateSettings,
+): { overstayDays: number; overstayAmount: number; overstayRate: number } {
+  const rate = overstayRate(settings, session.vehicle.type as VehicleType);
+  const days = ceilDays(session.expectedEnd, new Date());
+  return { overstayDays: days, overstayAmount: rate * days, overstayRate: rate };
+}

@@ -4,7 +4,8 @@ import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 
-import type { SavedDriver, DriverActiveSession } from "@/types/domain";
+import type { SavedDriver } from "@/types/domain";
+import type { ActionState } from "@/types/domain";
 import { loadDriver, saveDriver, clearDriver, getDeviceId } from "@/lib/driver-store";
 import { apiFetch, apiPost } from "@/lib/fetch";
 import { timeRemaining, timeOverdue, vehicleLabel } from "@/lib/time";
@@ -27,9 +28,26 @@ type State =
 
 type AllowListEntry = { name: string; label: string };
 
-type DriverResponse = {
+type DriverStateSession = {
+  id: string;
+  status: "ACTIVE" | "OVERSTAY";
+  expectedEnd: string;
+  spot: { label: string; type: string };
+  vehicle: {
+    id: string;
+    licensePlate: string | null;
+    unitNumber: string | null;
+    type: string;
+    nickname: string | null;
+  };
+  isMonthly: boolean;
+};
+
+type DriverStateResponse = {
   driver: { id: string; name: string; phone: string; email: string | null } | null;
-  activeSessions?: DriverActiveSession[];
+  allowList: { allowed: boolean; name?: string; label?: string };
+  activeSessions: DriverStateSession[];
+  allowedActions: ActionState[];
 };
 
 /** Detect if page load is a fresh QR scan (not refresh, back button, or shared link). */
@@ -37,7 +55,6 @@ function isExternalNavigation(): boolean {
   if (typeof window === "undefined") return false;
   const nav = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
   if (!nav || nav.type !== "navigate") return false;
-  // Internal link clicks (e.g. from home page) have same-origin referrer
   try {
     if (document.referrer && new URL(document.referrer).origin === window.location.origin) {
       return false;
@@ -52,9 +69,8 @@ function isExternalNavigation(): boolean {
 export default function ScanPage() {
   const router = useRouter();
   const [state, setState] = useState<State>("init");
-  // Single driver slot — populated on recognition or phone confirm
   const [driver, setDriver] = useState<SavedDriver | null>(null);
-  const [session, setSession] = useState<DriverActiveSession | null>(null);
+  const [session, setSession] = useState<DriverStateSession | null>(null);
   const [allowEntry, setAllowEntry] = useState<AllowListEntry | null>(null);
   const [phone, setPhone] = useState("");
   const [error, setError] = useState("");
@@ -63,29 +79,27 @@ export default function ScanPage() {
   const phoneRef = useRef<HTMLInputElement>(null);
   const freshScan = useRef(isExternalNavigation());
 
-  // Check allow list — returns true if the phone is allowed (gate opens, no session needed)
-  async function checkAllowList(phoneDigits: string): Promise<boolean> {
-    try {
-      const data = await apiFetch<{ allowed: boolean; name?: string; label?: string }>(
-        `/api/allowlist?phone=${phoneDigits}`
-      );
-      if (data.allowed) {
-        setAllowEntry({ name: data.name!, label: data.label! });
-        setState("allowlist");
-        return true;
-      }
-    } catch { /* not on list — continue normal flow */ }
-    return false;
-  }
+  // Resolve driver state → UI state
+  function resolveState(data: DriverStateResponse, currentPhone: string) {
+    if (data.allowList.allowed) {
+      setAllowEntry({ name: data.allowList.name!, label: data.allowList.label! });
+      setState("allowlist");
+      return;
+    }
 
-  // Resolve a verified driver: check for active sessions, route to correct state
-  function resolveDriver(d: { id: string; name: string; phone: string }, sessions: DriverActiveSession[]) {
-    const saved: SavedDriver = { id: d.id, name: d.name, phone: d.phone };
+    if (!data.driver) {
+      clearDriver();
+      setState("ask_type");
+      return;
+    }
+
+    const saved: SavedDriver = { id: data.driver.id, name: data.driver.name, phone: data.driver.phone };
     saveDriver(saved);
     setDriver(saved);
 
-    const active = sessions.find((s) => s.status === "ACTIVE");
-    const overstay = sessions.find((s) => s.status === "OVERSTAY");
+    // Effective status is already computed server-side
+    const active = data.activeSessions.find((s) => s.status === "ACTIVE");
+    const overstay = data.activeSessions.find((s) => s.status === "OVERSTAY");
 
     if (active) {
       setSession(active);
@@ -96,6 +110,7 @@ export default function ScanPage() {
     } else {
       setState("recognized");
     }
+    void currentPhone;
   }
 
   // On mount: check localStorage, then verify against server
@@ -107,28 +122,24 @@ export default function ScanPage() {
     }
 
     const digits = saved.phone.replace(/\D/g, "");
-
-    // Check allow list first — if on it, gate opens immediately
     Promise.resolve()
-      .then(() => { setState("checking"); return checkAllowList(digits); })
-      .then((allowed) => {
-        if (allowed) return;
-
-        // Not on allow list — check as a regular driver
-        apiFetch<DriverResponse>(`/api/drivers?phone=${digits}`)
+      .then(() => { setState("checking"); })
+      .then(() =>
+        apiFetch<DriverStateResponse>(`/api/driver/state?phone=${digits}`)
           .then((data) => {
-            if (data.driver?.id === saved.id) {
-              resolveDriver(data.driver, data.activeSessions ?? []);
-            } else {
+            // Verify the saved driver ID still matches
+            if (data.driver && data.driver.id !== saved.id) {
               clearDriver();
               setState("ask_type");
+              return;
             }
+            resolveState(data, digits);
           })
           .catch(() => {
             clearDriver();
             setState("ask_type");
-          });
-      });
+          }),
+      );
   }, []);
 
   // Auto-trigger gate for allow list entries
@@ -140,10 +151,11 @@ export default function ScanPage() {
     }
     Promise.resolve().then(() => {
       setGateTriggered(true);
-      apiPost("/api/gate", {
-        allowListPhone: phone.replace(/\D/g, "") || loadDriver()?.phone?.replace(/\D/g, ""),
+      apiPost("/api/allowlist/open-gate", {
+        phone: phone.replace(/\D/g, "") || loadDriver()?.phone?.replace(/\D/g, ""),
         deviceId: getDeviceId(),
         direction: "ENTRANCE",
+        scanContext: "fresh",
       }).catch(() => {});
     });
   }, [state, gateTriggered, phone]);
@@ -155,10 +167,26 @@ export default function ScanPage() {
       Promise.resolve().then(() => setGateDenied(true));
       return;
     }
+    if (!session || !driver) return;
     Promise.resolve().then(() => {
       setGateTriggered(true);
-      apiPost("/api/gate", { driverId: driver?.id, sessionId: session?.id, deviceId: getDeviceId(), direction: "ENTRANCE" })
-        .catch(() => {});
+      apiPost<
+        | { ok: true; result: { openedAt: string } }
+        | { ok: false; denial: { code: string; message: string } }
+      >(`/api/sessions/${session.id}/open-gate`, {
+        driverId: driver.id,
+        deviceId: getDeviceId(),
+        direction: "ENTRANCE",
+        scanContext: "fresh",
+      })
+        .then((result) => {
+          if (!result.ok) {
+            setGateDenied(true);
+          }
+        })
+        .catch(() => {
+          // Fail silently — driver still sees session info
+        });
     });
   }, [state, gateTriggered, driver, session]);
 
@@ -175,19 +203,22 @@ export default function ScanPage() {
     if (digits.length < 7) { setError("Enter a valid phone number"); return; }
     setState("checking");
     try {
-      // Check allow list first
-      const allowed = await checkAllowList(digits);
-      if (allowed) return;
+      const data = await apiFetch<DriverStateResponse>(`/api/driver/state?phone=${digits}`);
 
-      // Not on allow list — check as driver
-      const data = await apiFetch<DriverResponse>(`/api/drivers?phone=${digits}`);
+      if (data.allowList.allowed) {
+        setAllowEntry({ name: data.allowList.name!, label: data.allowList.label! });
+        setState("allowlist");
+        return;
+      }
+
       if (!data.driver) {
         setState("not_found");
         return;
       }
+
       // If they have active sessions, resolve immediately (skip confirm step)
-      if (data.activeSessions && data.activeSessions.length > 0) {
-        resolveDriver(data.driver, data.activeSessions);
+      if (data.activeSessions.length > 0) {
+        resolveState(data, digits);
       } else {
         // No active session — set as pending driver, ask to confirm
         setDriver({ id: data.driver.id, name: data.driver.name, phone: data.driver.phone });
@@ -709,7 +740,7 @@ export default function ScanPage() {
               </div>
             </div>
 
-            <Link href={`/extend`} className="g-btn g-btn-ghost" style={{ textAlign: "center", justifyContent: "center" }}>
+            <Link href="/extend" className="g-btn g-btn-ghost" style={{ textAlign: "center", justifyContent: "center" }}>
               Extend parking time
             </Link>
 
@@ -750,7 +781,7 @@ export default function ScanPage() {
               </div>
             </div>
 
-            <Link href={`/exit`} className="g-btn g-btn-primary" style={{ justifyContent: "center" }}>
+            <Link href="/exit" className="g-btn g-btn-primary" style={{ justifyContent: "center" }}>
               Settle overstay & open gate
             </Link>
 

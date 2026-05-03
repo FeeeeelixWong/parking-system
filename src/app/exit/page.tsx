@@ -1,24 +1,44 @@
 "use client";
 
-import { Suspense, useEffect, useState, useCallback } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 
-import type { SavedDriver, ApiDriver, ApiPayment, OverstayInfo } from "@/types/domain";
+import type { OverstayInfo, ActionState } from "@/types/domain";
 import { loadDriver, saveDriver, clearDriver, getDeviceId } from "@/lib/driver-store";
 import { apiFetch, apiPost } from "@/lib/fetch";
 import PhoneInput from "@/components/PhoneInput";
 
 /* ─── types ─────────────────────────────────────────────── */
-type ExitSession = {
+type DriverStateSession = {
   id: string;
   status: "ACTIVE" | "OVERSTAY";
   expectedEnd: string;
-  startedAt: string;
-  spot: { label: string };
-  vehicle: { licensePlate: string; type: string };
-  payments: Pick<ApiPayment, "amount" | "days" | "type">[];
+  spot: { label: string; type: string };
+  vehicle: {
+    id: string;
+    licensePlate: string | null;
+    unitNumber: string | null;
+    type: string;
+    nickname: string | null;
+  };
+  isMonthly: boolean;
 };
+
+type DriverStateResponse = {
+  driver: { id: string; name: string; phone: string; email: string | null } | null;
+  allowList: { allowed: boolean; name?: string; label?: string };
+  activeSessions: DriverStateSession[];
+  overstayPreview: {
+    sessionId: string;
+    overstayDays: number;
+    overstayAmount: number;
+    overstayRate: number;
+  } | null;
+  allowedActions: ActionState[];
+};
+
+type ExitDriver = { id: string; name: string; phone: string };
 
 type State =
   | "init"
@@ -61,8 +81,8 @@ function ExitContent() {
   const paidRedirect = searchParams.get("paid") === "1";
 
   const [state, setState] = useState<State>(paidRedirect ? "exited" : "init");
-  const [driver, setDriver] = useState<ApiDriver | null>(null);
-  const [session, setSession] = useState<ExitSession | null>(null);
+  const [driver, setDriver] = useState<ExitDriver | null>(null);
+  const [session, setSession] = useState<DriverStateSession | null>(null);
   const [overstayInfo, setOverstayInfo] = useState<OverstayInfo | null>(null);
   const [managerPhone, setManagerPhone] = useState<string>("");
 
@@ -79,73 +99,78 @@ function ExitContent() {
       .catch(() => {});
   }, []);
 
-  /* resolve driver → session on mount */
-  const resolveDriverAndSession = useCallback(
-    async (apiDriver: ApiDriver) => {
-      setDriver(apiDriver);
-      const fresh: SavedDriver = {
-        id: apiDriver.id,
-        name: apiDriver.name,
-        phone: apiDriver.phone,
-      };
-      saveDriver(fresh);
-
-      const data = await apiFetch<{ session: ExitSession | null }>(
-        `/api/sessions?driverId=${apiDriver.id}`
-      );
-      const activeSession: ExitSession | null = data.session ?? null;
-
-      if (!activeSession) {
-        setState("no_session");
-        return;
-      }
-
-      setSession(activeSession);
-
-      if (activeSession.status === "ACTIVE") {
-        // Auto-open gate for active sessions — no button needed
-        setState("gate_opening");
-        apiPost("/api/gate", {
-          driverId: apiDriver.id,
-          sessionId: activeSession.id,
+  /* resolve driver state → UI state */
+  async function resolveState(digits: string, data: DriverStateResponse) {
+    if (data.allowList.allowed) {
+      setState("gate_opening");
+      try {
+        await apiPost("/api/allowlist/open-gate", {
+          phone: digits,
           deviceId: getDeviceId(),
           direction: "EXIT",
-        })
-          .then(() => setState("gate_opened"))
-          .catch(() => setState("gate_opened")); // show info even if gate call fails
-        return;
-      }
+          scanContext: "fresh",
+        });
+      } catch { /* show gate_opened even if gate call fails */ }
+      setState("gate_opened");
+      return;
+    }
 
-      if (activeSession.status === "OVERSTAY") {
-        /* probe exit endpoint for fee breakdown */
-        try {
-          const exitData = await apiPost<OverstayInfo & { success?: boolean }>(
-            "/api/sessions/exit",
-            { sessionId: activeSession.id, driverId: apiDriver.id }
-          );
-          if (exitData.requiresPayment) {
-            setOverstayInfo(exitData);
-            setState("overstayed");
-          } else if (exitData.success) {
-            setState("exited");
-          } else {
-            setState("overstayed");
-          }
-        } catch {
-          // probe failed — show overstay state without fee details
-          setState("overstayed");
+    if (!data.driver) {
+      setState("not_registered");
+      return;
+    }
+
+    const d: ExitDriver = { id: data.driver.id, name: data.driver.name, phone: data.driver.phone };
+    saveDriver({ id: d.id, name: d.name, phone: d.phone });
+    setDriver(d);
+
+    if (!data.activeSessions.length) {
+      setState("no_session");
+      return;
+    }
+
+    const s = data.activeSessions[0];
+    setSession(s);
+
+    if (s.status === "ACTIVE") {
+      setState("gate_opening");
+      try {
+        const result = await apiPost<
+          | { ok: true; result: { openedAt: string } }
+          | { ok: false; denial: { message: string } }
+        >(`/api/sessions/${s.id}/open-gate`, {
+          driverId: d.id,
+          deviceId: getDeviceId(),
+          direction: "EXIT",
+          scanContext: "fresh",
+        });
+        if (!result.ok) {
+          setError(result.denial.message);
+          setState("has_session");
+        } else {
+          setState("gate_opened");
         }
-      } else {
-        setState("has_session");
+      } catch {
+        setState("gate_opened"); // show info even if gate call fails
       }
-    },
-    []
-  );
+      return;
+    }
+
+    // OVERSTAY
+    if (data.overstayPreview) {
+      setOverstayInfo({
+        requiresPayment: true,
+        overstayDays: data.overstayPreview.overstayDays,
+        overstayAmount: data.overstayPreview.overstayAmount,
+        overstayRate: data.overstayPreview.overstayRate,
+        sessionId: data.overstayPreview.sessionId,
+      });
+    }
+    setState("overstayed");
+  }
 
   /* on mount: check localStorage */
   useEffect(() => {
-    // Paid-overstay redirect from /payment-complete — show the exited screen
-    // and skip identity resolution since the session is already closed.
     if (paidRedirect) return;
 
     const saved = loadDriver();
@@ -155,12 +180,11 @@ function ExitContent() {
     }
     setState("checking");
 
-    apiFetch<{ driver: ApiDriver | null }>(
-      `/api/drivers?phone=${saved.phone.replace(/\D/g, "")}`
-    )
+    const digits = saved.phone.replace(/\D/g, "");
+    apiFetch<DriverStateResponse>(`/api/driver/state?phone=${digits}`)
       .then((data) => {
-        if (data.driver?.id === saved.id) {
-          resolveDriverAndSession(data.driver);
+        if (data.driver?.id === saved.id || data.allowList.allowed) {
+          resolveState(digits, data);
         } else {
           clearDriver();
           setState("ask_type");
@@ -170,7 +194,7 @@ function ExitContent() {
         clearDriver();
         setState("ask_type");
       });
-  }, [resolveDriverAndSession, paidRedirect]);
+  }, [paidRedirect]);
 
   /* ── phone lookup (existing user flow) ── */
   async function handlePhoneLookup(e: React.FormEvent) {
@@ -183,14 +207,8 @@ function ExitContent() {
     }
     setActionLoading(true);
     try {
-      const data = await apiFetch<{ driver: ApiDriver | null }>(
-        `/api/drivers?phone=${digits}`
-      );
-      if (!data.driver) {
-        setState("not_registered");
-      } else {
-        await resolveDriverAndSession(data.driver);
-      }
+      const data = await apiFetch<DriverStateResponse>(`/api/driver/state?phone=${digits}`);
+      await resolveState(digits, data);
     } catch {
       setError("Could not look up your number. Try again.");
     } finally {
@@ -198,21 +216,28 @@ function ExitContent() {
     }
   }
 
-  /* ── gate open (active session, no overstay) ── */
+  /* ── gate open (active session, manual trigger) ── */
   async function handleOpenGate() {
-    if (!session) return;
+    if (!session || !driver) return;
     setActionLoading(true);
     setError("");
     setState("gate_opening");
     try {
-      // Trigger gate + log exit direction with device ID
-      await apiPost("/api/gate", {
-        driverId: driver?.id,
-        sessionId: session.id,
+      const result = await apiPost<
+        | { ok: true; result: { openedAt: string } }
+        | { ok: false; denial: { message: string } }
+      >(`/api/sessions/${session.id}/open-gate`, {
+        driverId: driver.id,
         deviceId: getDeviceId(),
         direction: "EXIT",
+        scanContext: "fresh",
       });
-      setState("exited");
+      if (!result.ok) {
+        setError(result.denial.message);
+        setState("has_session");
+      } else {
+        setState("exited");
+      }
     } catch {
       setError("Network error. Please try again.");
       setState("has_session");
@@ -223,33 +248,24 @@ function ExitContent() {
 
   /* ── overstay payment ── */
   async function handlePayOverstay() {
-    if (!overstayInfo || !driver) return;
+    if (!session || !driver) return;
     setActionLoading(true);
     setError("");
     try {
-      // Redirect to Stripe Checkout. On return to /payment-complete the
-      // webhook has already marked the session COMPLETED + written the
-      // Payment row; /payment-complete redirects back here with ?paid=1
-      // so the user sees the "exited" state.
-      const checkoutRes = await fetch("/api/payments/checkout", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          driverId: driver.id,
-          sessionId: overstayInfo.sessionId,
-          sessionPurpose: "OVERSTAY",
-          days: overstayInfo.overstayDays,
-        }),
+      const result = await apiPost<
+        | { ok: true; result: { checkoutUrl: string } }
+        | { ok: false; denial: { message: string } }
+      >(`/api/sessions/${session.id}/request-overstay-checkout`, {
+        driverId: driver.id,
       });
-      const checkoutData = await checkoutRes.json();
-      if (!checkoutRes.ok || !checkoutData.checkoutUrl) {
-        setError(checkoutData.error || "Could not start payment. Please try again.");
+      if (!result.ok) {
+        setError(result.denial.message);
         setActionLoading(false);
         return;
       }
-      window.location.href = checkoutData.checkoutUrl;
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Payment failed. Please try again.");
+      window.location.href = result.result.checkoutUrl;
+    } catch {
+      setError("Payment failed. Please try again.");
       setActionLoading(false);
     }
   }
@@ -339,8 +355,8 @@ function GateOpenedView({
   session,
   onNotYou,
 }: {
-  driver: ApiDriver;
-  session: ExitSession;
+  driver: ExitDriver;
+  session: DriverStateSession;
   onNotYou: () => void;
 }) {
   const expiresAt = new Date(session.expectedEnd).toLocaleString("en-US", {
@@ -367,7 +383,7 @@ function GateOpenedView({
         </div>
         <div style={styles.cardRow}>
           <span style={styles.cardKey}>Plate</span>
-          <span style={styles.cardVal}>{session.vehicle.licensePlate}</span>
+          <span style={styles.cardVal}>{session.vehicle.licensePlate ?? "—"}</span>
         </div>
         <div style={styles.cardRow}>
           <span style={styles.cardKey}>Expires</span>
@@ -403,14 +419,13 @@ function ActiveSessionView({
   error,
   onNotYou,
 }: {
-  driver: ApiDriver;
-  session: ExitSession;
+  driver: ExitDriver;
+  session: DriverStateSession;
   onOpenGate: () => void;
   loading: boolean;
   error: string;
   onNotYou: () => void;
 }) {
-  const checkinPayment = session.payments.find((p) => p.type === "CHECKIN");
   const expiresAt = new Date(session.expectedEnd).toLocaleString("en-US", {
     hour: "numeric",
     minute: "2-digit",
@@ -429,20 +444,12 @@ function ActiveSessionView({
         </div>
         <div style={styles.cardRow}>
           <span style={styles.cardKey}>Plate</span>
-          <span style={styles.cardVal}>{session.vehicle.licensePlate}</span>
+          <span style={styles.cardVal}>{session.vehicle.licensePlate ?? "—"}</span>
         </div>
         <div style={styles.cardRow}>
           <span style={styles.cardKey}>Expires</span>
           <span style={styles.cardVal}>{expiresAt}</span>
         </div>
-        {checkinPayment && (
-          <div style={styles.cardRow}>
-            <span style={styles.cardKey}>Paid</span>
-            <span style={styles.cardVal}>
-              ${checkinPayment.amount.toFixed(2)} · {checkinPayment.days}d
-            </span>
-          </div>
-        )}
       </div>
 
       {error && <p style={styles.error}>{error}</p>}
@@ -470,8 +477,8 @@ function OverstayView({
   error,
   onNotYou,
 }: {
-  driver: ApiDriver;
-  session: ExitSession;
+  driver: ExitDriver;
+  session: DriverStateSession;
   overstayInfo: OverstayInfo | null;
   managerPhone: string;
   onPay: () => void;
@@ -560,7 +567,7 @@ function NoSessionView({
   driver,
   onNotYou,
 }: {
-  driver: ApiDriver;
+  driver: ExitDriver;
   onNotYou: () => void;
 }) {
   return (
@@ -809,10 +816,6 @@ const styles: Record<string, React.CSSProperties> = {
     marginTop: 16,
     textAlign: "center" as const,
     lineHeight: 1.5,
-  },
-  accent: {
-    color: "#2D7A4A",
-    fontWeight: 600,
   },
   error: {
     fontSize: 13,

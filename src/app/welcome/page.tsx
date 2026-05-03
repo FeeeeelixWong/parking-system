@@ -3,14 +3,25 @@
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
-import type { ApiSession, ApiVehicle, ApiSpot } from "@/types/domain";
 import { loadDriver, clearDriver, getDeviceId } from "@/lib/driver-store";
 import { apiFetch, apiPost } from "@/lib/fetch";
 import { timeRemaining as _timeRemaining, vehicleLabel as _vehicleLabel } from "@/lib/time";
+import type { ActionState } from "@/types/domain";
 
-type ActiveSession = Pick<ApiSession, "id" | "startedAt" | "expectedEnd" | "status"> & {
-  spot: Pick<ApiSpot, "label" | "type">;
-  vehicle: ApiVehicle;
+type DriverStateSession = {
+  id: string;
+  status: "ACTIVE" | "OVERSTAY";
+  expectedEnd: string;
+  startedAt: string;
+  spot: { label: string; type: string };
+  vehicle: {
+    id: string;
+    licensePlate: string | null;
+    unitNumber: string | null;
+    type: string;
+    nickname: string | null;
+  };
+  isMonthly: boolean;
 };
 
 export default function WelcomePage() {
@@ -48,10 +59,9 @@ function WelcomeContent() {
   const searchParams = useSearchParams();
   const driverId = searchParams.get("driverId");
 
-  const [now] = useState(() => Date.now());
-
   const [driverName, setDriverName] = useState("");
-  const [sessions, setSessions] = useState<ActiveSession[]>([]);
+  const [sessions, setSessions] = useState<DriverStateSession[]>([]);
+  const [allowedActions, setAllowedActions] = useState<ActionState[]>([]);
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState("");
   const [gateLoading, setGateLoading] = useState<string | null>(null);
@@ -64,12 +74,21 @@ function WelcomeContent() {
     }
 
     const saved = loadDriver();
-    const savedName = saved?.name || "";
+    const phone = saved?.phone ?? "";
+    if (!phone) {
+      router.replace("/entry");
+      return;
+    }
 
-    apiFetch<{ activeSessions: ActiveSession[] }>(`/api/sessions?driverId=${driverId}`)
-      .then((d) => {
-        setDriverName(savedName);
-        setSessions(d.activeSessions || []);
+    apiFetch<{
+      driver: { id: string; name: string } | null;
+      activeSessions: DriverStateSession[];
+      allowedActions: ActionState[];
+    }>(`/api/driver/state?phone=${encodeURIComponent(phone)}`)
+      .then((state) => {
+        setDriverName(state.driver?.name ?? saved?.name ?? "");
+        setSessions(state.activeSessions ?? []);
+        setAllowedActions(state.allowedActions ?? []);
         setLoading(false);
       })
       .catch(() => {
@@ -81,27 +100,31 @@ function WelcomeContent() {
   const vehicleLabel = _vehicleLabel;
   const timeRemaining = (s: string) => _timeRemaining(s);
 
-  function isOverstayed(session: ActiveSession) {
-    // Use status as primary signal; fall back to time-check to catch
-    // sessions that are past expectedEnd but haven't been marked by cron yet
-    return session.status === "OVERSTAY" || new Date(session.expectedEnd).getTime() < now;
-  }
-
-  async function handleOpenGate(session: ActiveSession) {
-    if (isOverstayed(session)) {
-      router.push(`/exit`);
+  async function handleOpenGate(session: DriverStateSession) {
+    // Backend already encodes effective overstay in status — redirect without a gate call
+    if (session.status === "OVERSTAY") {
+      router.push("/exit");
       return;
     }
 
     setGateLoading(session.id);
     setGateError("");
     try {
-      await apiPost("/api/gate", {
+      const result = await apiPost<
+        | { ok: true; result: { openedAt: string } }
+        | { ok: false; denial: { message: string } }
+      >(`/api/sessions/${session.id}/open-gate`, {
         driverId: loadDriver()?.id,
-        sessionId: session.id,
         deviceId: getDeviceId(),
         direction: "ENTRANCE",
+        scanContext: "internal",
       });
+
+      if (!result.ok) {
+        setGateError(result.denial.message);
+        setGateLoading(null);
+        return;
+      }
       router.push(`/confirmation?gateOpened=true&sessionId=${session.id}`);
     } catch {
       setGateError("Gate could not be opened. Please try again.");
@@ -134,6 +157,7 @@ function WelcomeContent() {
   }
 
   const firstName = driverName.split(" ")[0] || "Driver";
+  const gateAction = allowedActions.find((a) => a.code === "OPEN_GATE");
 
   return (
     <div className="min-h-screen" style={{ background: "var(--bg)" }}>
@@ -172,6 +196,13 @@ function WelcomeContent() {
           </div>
         )}
 
+        {/* Disabled gate reason */}
+        {gateAction && !gateAction.enabled && gateAction.reason && (
+          <div className="rounded-lg p-4 text-sm font-medium" style={{ background: "#FEF3C7", color: "#92400E", border: "1px solid #D97706" }}>
+            {gateAction.reason}
+          </div>
+        )}
+
         {/* Active sessions */}
         {sessions.length > 0 && (
           <section
@@ -194,7 +225,7 @@ function WelcomeContent() {
             </div>
 
             {sessions.map((s) => {
-              const overstayed = isOverstayed(s);
+              const overstayed = s.status === "OVERSTAY";
               const isOpening = gateLoading === s.id;
 
               return (
@@ -313,7 +344,7 @@ function WelcomeContent() {
                       style={{ color: "var(--accent)" }}
                       onClick={(e) => {
                         e.stopPropagation();
-                        router.push(`/extend`);
+                        router.push("/extend");
                       }}
                     >
                       Extend time / Extender tiempo

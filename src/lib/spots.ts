@@ -63,3 +63,22 @@ export async function assignSpot(
 
   return null;
 }
+
+/** Read-only count of free spots per type. No locking — display only. */
+export async function countFreeSpots(): Promise<{ bobtail: number; truck: number }> {
+  const [bobtail, truck] = await Promise.all([
+    prisma.spot.count({
+      where: {
+        type: "BOBTAIL",
+        sessions: { none: { status: { in: ["ACTIVE", "OVERSTAY"] } } },
+      },
+    }),
+    prisma.spot.count({
+      where: {
+        type: "TRUCK_TRAILER",
+        sessions: { none: { status: { in: ["ACTIVE", "OVERSTAY"] } } },
+      },
+    }),
+  ]);
+  return { bobtail, truck };
+}

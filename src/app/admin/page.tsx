@@ -104,8 +104,11 @@ function fmtDate(iso: string | null): string {
 
 function calcDuration(start: string, end: string | null): string {
   const ms = (end ? new Date(end).getTime() : Date.now()) - new Date(start).getTime();
-  const hrs = Math.floor(ms / 3600000);
-  const mins = Math.floor((ms % 3600000) / 60000);
+  const totalMins = Math.floor(ms / 60000);
+  const days = Math.floor(totalMins / 1440);
+  const hrs = Math.floor((totalMins % 1440) / 60);
+  const mins = totalMins % 60;
+  if (days > 0) return hrs > 0 ? `${days}d ${hrs}h` : `${days}d`;
   if (hrs > 0) return `${hrs}h ${mins}m`;
   return `${mins}m`;
 }

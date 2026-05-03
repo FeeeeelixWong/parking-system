@@ -58,21 +58,22 @@ Gate QR codes (two physical laminated QR codes):
 
 **Entry page flow** (`/entry`):
 1. Mount: check `parking_driver` in localStorage
-2. If saved: verify against `GET /api/drivers?phone=X` (ID must match)
-3. Check allow list first (`GET /api/allowlist?phone=X`) — if on list, gate opens, no session needed
-4. If driver verified: check `activeSessions` in the API response
-   - ACTIVE session → auto-fire `POST /api/gate` (direction=ENTRANCE), show session info
+2. If saved: call `GET /api/driver/state?phone=X` — single request for identity + allowList + sessions
+3. If allow-listed → auto-fire `POST /api/allowlist/open-gate` (direction=ENTRANCE, scanContext=fresh)
+4. If driver verified: check `activeSessions` in the state response
+   - ACTIVE session → auto-fire `POST /api/sessions/:id/open-gate` (direction=ENTRANCE, scanContext=fresh)
    - OVERSTAY → show fee screen, link to `/exit` for settlement
    - No session → "Welcome back, check in" screen
 5. If not saved: show "New driver / Returning driver" menu
-6. Phone lookup → if has active session, gate opens immediately
+6. Phone lookup → same `GET /api/driver/state` path
 7. Gate only auto-fires on fresh external navigation (not refresh, not internal link)
 
 **Exit page flow** (`/exit`):
-1. Same identity flow as entry
-2. ACTIVE session → auto-fire `POST /api/gate` (direction=EXIT), show "Gate opening, spot still reserved"
-3. OVERSTAY → show fee + "Settle overstay & open gate" button (calls `POST /api/sessions/exit`)
-4. No session → "No active session" message
+1. Mount: call `GET /api/driver/state?phone=X` — identity + allowList + sessions + overstayPreview
+2. If allow-listed → auto-fire `POST /api/allowlist/open-gate` (direction=EXIT, scanContext=fresh)
+3. ACTIVE session → auto-fire `POST /api/sessions/:id/open-gate` (direction=EXIT, scanContext=fresh)
+4. OVERSTAY → show fee from `overstayPreview`, "Settle overstay" button calls `POST /api/sessions/:id/request-overstay-checkout`
+5. No session → "No active session" message
 
 ---
 
@@ -81,14 +82,15 @@ Gate QR codes (two physical laminated QR codes):
 Sessions are **time-based reservations** (hotel model), NOT gate passes.
 
 - **Session = reservation.** Driver pays for X days or X months, spot is theirs until `expectedEnd`.
-- **Gate is decoupled from session.** Both entry and exit scans call `POST /api/gate`
-  which opens the gate and logs the direction. Neither ends the session.
+- **Gate is decoupled from session.** Entry and exit scans call `POST /api/sessions/:id/open-gate`
+  (or `POST /api/allowlist/open-gate` for allow-listed phones), which opens hardware and logs the
+  direction. Neither ends the session.
 - **Sessions expire by time.** When `expectedEnd` passes → grace period → cron flips
   to OVERSTAY → manager walks lot and overrides false positives.
 - **No explicit checkout.** Scan, gate opens, drive through. No prompts.
-- **Overstay settlement** uses `POST /api/sessions/exit` — only called when a driver
-  is overstayed and pays the fee. This + manager override are the only paths that
-  complete a session programmatically.
+- **Overstay settlement** uses `POST /api/sessions/:id/request-overstay-checkout` — creates a Stripe
+  Checkout for the fee; webhook marks session COMPLETED on payment. Manager override is the other
+  path that completes a session programmatically.
 - **Pricing tiers**: Daily (1-30 days) and Monthly (1-12 months). Selected at check-in.
   Monthly sessions just set `expectedEnd` further out — same gate/overstay logic.
 
@@ -113,15 +115,17 @@ Six tabs:
 
 ## Gate Security
 
-**Layer 1 (DONE):** `POST /api/gate` requires a valid `sessionId` OR `allowListPhone`.
-Validates session exists, is ACTIVE or OVERSTAY, driver matches. OVERSTAY sessions can
-exit but not enter. Rejects with 403 + logs `GATE_DENIED` with full details.
-
-**Allow list path**: `POST /api/gate` with `allowListPhone` — checks AllowList table,
-opens gate if active, logs `ALLOWLIST_ENTRY`. No session needed.
+**Layer 1 (DONE):** Two gate command endpoints enforce all access control:
+- `POST /api/sessions/:id/open-gate` — validates session ownership, active/overstay
+  status (effective, not just DB value), driver match, and suspicious-entry detection
+  before triggering hardware. OVERSTAY blocks entrance; exit allowed. Rejects with typed
+  `{ ok: false, denial }` + logs `GATE_DENIED`.
+- `POST /api/allowlist/open-gate` — checks AllowList table, requires `scanContext: "fresh"`,
+  opens gate if active, logs `ALLOWLIST_ENTRY`. No session needed.
 
 **Refresh protection**: Entry page auto-gate only fires on fresh external navigation
-(PerformanceNavigationTiming + document.referrer check). Refresh, back button, internal
+(PerformanceNavigationTiming + document.referrer check). `scanContext: "fresh"` is also
+enforced server-side on both gate command endpoints. Refresh, back button, internal
 links, and shared URLs do NOT trigger the gate — shows "Please re-scan QR" instead.
 
 **Device tracking**: `parking_device_id` in localStorage (survives driver resets).
@@ -156,20 +160,23 @@ same session → `SUSPICIOUS_ENTRY` logged.
 ### API Routes
 | Route | Methods | Purpose |
 |-------|---------|---------|
-| `/api/gate` | POST | Open gate (requires sessionId or allowListPhone) |
 | `/api/drivers` | GET, POST | Driver lookup (phone/email), upsert |
 | `/api/vehicles` | GET, POST | Vehicle CRUD by driver |
 | `/api/sessions` | GET, POST | List active sessions, create new session |
-| `/api/sessions/exit` | POST | Overstay fee settlement |
-| `/api/sessions/extend` | POST | Extend session days |
 | `/api/sessions/history` | GET | Paginated session history with filters |
+| `/api/sessions/[id]/open-gate` | POST | Command: open gate for a session; returns `{ ok, result/denial }` |
+| `/api/sessions/[id]/request-extension-checkout` | POST | Command: create extension Stripe Checkout; returns `{ ok, result/denial }` |
+| `/api/sessions/[id]/request-overstay-checkout` | POST | Command: create overstay Stripe Checkout; returns `{ ok, result/denial }` |
 | `/api/spots` | GET | All spots with active sessions (for lot map) |
 | `/api/spots/layout` | GET, PUT | Lot editor state (spots + groups) — admin only for PUT |
 | `/api/settings` | GET, PUT | App settings (strips sensitive tokens from GET response) |
 | `/api/audit` | GET | Audit log entries with action/pagination filters |
 | `/api/allowlist` | GET | Check phone against allow list (public) |
+| `/api/allowlist/open-gate` | POST | Command: open gate for allow-list phone; returns `{ ok, result/denial }` |
 | `/api/payments/checkout` | POST | Create Stripe Checkout session; return URL for redirect |
 | `/api/payments/lookup` | GET | Poll for Payment row after Stripe Checkout redirect |
+| `/api/pricing/preview` | GET | Server-side rate preview — `?vehicleType&durationType&days/months` |
+| `/api/driver/state` | GET | Unified driver state — allowList, sessions, availability, allowedActions — `?phone=` |
 | `/api/stripe/webhook` | POST | Stripe webhook: creates sessions/payments, writes QB receipts |
 | `/api/admin/drivers` | GET, PUT | Admin driver search + edit |
 | `/api/admin/sessions` | PUT | Admin session actions (extend/cancel/close with backdate) |

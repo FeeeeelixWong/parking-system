@@ -91,7 +91,7 @@ type CheckoutMetadata = {
   vehicleId?: string;
   sessionPurpose: "CHECKIN" | "MONTHLY_CHECKIN" | "EXTENSION" | "OVERSTAY";
   sessionId?: string;
-  hours?: string;
+  days?: string;
   months?: string;
   termsVersion?: string;
   overstayAuthorized?: string;

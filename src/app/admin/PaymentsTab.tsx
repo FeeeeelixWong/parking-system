@@ -7,7 +7,6 @@ import {
   CARD_BG, BORDER, FG, FG_MUTED, FG_DIM,
   chip, inputStyle, paginationBtn,
   qbLinks, isRealPayment, stripeDashboardUrl,
-  monthlyLabel,
 } from "./_shared";
 
 // ---------------------------------------------------------------------------
@@ -104,9 +103,12 @@ function TransactionDetailsPopup({ payment, siblingPayments, onClose, stripeTest
     OVERSTAY: "Overstay",
   };
 
-  const typeLabel = isMonthly && monthlyIndex >= 0
-    ? monthlyLabel(siblingPayments, payment.id)
+  const typeLabel = isMonthly
+    ? (payment.type === "MONTHLY_CHECKIN" ? "Monthly check-in" : "Monthly renewal")
     : (baseTypeLabel[payment.type] ?? payment.type);
+  const monthlyCount = isMonthly && monthlyIndex >= 0
+    ? `(${monthlyIndex + 1}/${monthlyTotal})`
+    : null;
 
   const sessionStatus = payment.session?.status;
   const spotLabel = payment.session?.spot?.label ?? null;
@@ -130,9 +132,6 @@ function TransactionDetailsPopup({ payment, siblingPayments, onClose, stripeTest
   const tdLast: React.CSSProperties = { ...tdStyle, borderBottom: "none" };
 
   const hasRows = stripeRefunds.length > 0;
-
-  // suppress unused vars
-  void monthlyTotal;
 
   return (
     <div
@@ -185,6 +184,7 @@ function TransactionDetailsPopup({ payment, siblingPayments, onClose, stripeTest
               </td>
               <td style={{ ...(hasRows ? tdStyle : tdLast), textAlign: "right", fontWeight: 600, color: "#059669" }}>
                 +${payment.amount.toFixed(2)}
+                {monthlyCount && <span style={{ fontSize: 10, fontWeight: 400, color: "#9CA3AF", marginLeft: 3 }}>{monthlyCount}</span>}
                 {payment.days ? <div style={{ fontSize: 11, fontWeight: 400, color: "#6B7280" }}>{payment.days}d</div> : null}
               </td>
               <td style={hasRows ? tdStyle : tdLast}>
@@ -786,6 +786,15 @@ export default function PaymentsTab({ mobile, initialSearch = "" }: { mobile: bo
                   const isDisputed         = p.status === "DISPUTED";
                   const rowBg = idx % 2 === 0 ? CARD_BG : "#F8FAFC";
 
+                  const isMonthly = p.type === "MONTHLY_CHECKIN" || p.type === "MONTHLY_RENEWAL";
+                  const monthlyCount = isMonthly ? (() => {
+                    const siblings = payments
+                      .filter(q => q.session?.id && q.session.id === p.session?.id && (q.type === "MONTHLY_CHECKIN" || q.type === "MONTHLY_RENEWAL"))
+                      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+                    const mi = siblings.findIndex(q => q.id === p.id);
+                    return mi >= 0 ? `(${mi + 1}/${siblings.length})` : null;
+                  })() : null;
+
                   // suppress unused — kept for future QB deep-links
                   void stripeCustId;
                   void qbCustId;
@@ -819,9 +828,7 @@ export default function PaymentsTab({ mobile, initialSearch = "" }: { mobile: bo
                       {/* Type */}
                       <td style={{ ...cell }}>
                         <span style={typeBadgeStyle}>
-                          {(p.type === "MONTHLY_CHECKIN" || p.type === "MONTHLY_RENEWAL")
-                            ? monthlyLabel(payments.filter(q => q.session?.id && q.session.id === p.session?.id), p.id)
-                            : (typeLabels[p.type] ?? p.type)}
+                          {typeLabels[p.type] ?? p.type}
                         </span>
                       </td>
 
@@ -858,15 +865,13 @@ export default function PaymentsTab({ mobile, initialSearch = "" }: { mobile: bo
                             </div>
                             <div style={{ fontWeight: 700, fontVariantNumeric: "tabular-nums", color: isRefunded ? "#92400E" : "#B45309" }}>
                               ${(p.amount - p.refundedAmount).toFixed(2)}
+                              {monthlyCount && <span style={{ fontSize: 10, fontWeight: 400, color: FG_DIM, marginLeft: 3 }}>{monthlyCount}</span>}
                             </div>
                           </>
                         ) : (
-                          <span style={{
-                            fontWeight: 700, fontVariantNumeric: "tabular-nums",
-                            color: isDisputed ? "#EF4444" : FG,
-                            textDecoration: undefined,
-                          }}>
+                          <span style={{ fontWeight: 700, fontVariantNumeric: "tabular-nums", color: isDisputed ? "#EF4444" : FG }}>
                             ${p.amount.toFixed(2)}
+                            {monthlyCount && <span style={{ fontSize: 10, fontWeight: 400, color: FG_DIM, marginLeft: 3 }}>{monthlyCount}</span>}
                           </span>
                         )}
                       </td>
