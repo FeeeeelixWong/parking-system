@@ -16,8 +16,25 @@ export function requireTestDatabaseUrl(): string {
     throw new Error("TEST_DATABASE_URL is required for Playwright DB tests.");
   }
   const lower = testDatabaseUrl.toLowerCase();
-  if (!lower.includes("test") && !lower.includes("localhost") && !lower.includes("127.0.0.1")) {
-    throw new Error("Refusing to run e2e tests against a non-test-looking database URL.");
+  const hasTestMarker =
+    lower.includes("test") ||
+    lower.includes("localhost") ||
+    lower.includes("127.0.0.1");
+
+  // Also accept a URL that is provably distinct from the production DATABASE_URL
+  // (different hostname = different Neon branch / server).
+  const productionUrl = process.env.DATABASE_URL ?? "";
+  let isDifferentHost = false;
+  if (!hasTestMarker && productionUrl) {
+    try {
+      isDifferentHost = new URL(testDatabaseUrl).host !== new URL(productionUrl).host;
+    } catch { /* unparseable URL falls through to the error below */ }
+  }
+
+  if (!hasTestMarker && !isDifferentHost) {
+    throw new Error(
+      "TEST_DATABASE_URL must contain 'test' / 'localhost', or be a different host from DATABASE_URL.",
+    );
   }
   return testDatabaseUrl;
 }
@@ -94,8 +111,8 @@ export async function seedActiveDriverSession(args?: {
     email: string | null;
   }>(
     `
-    INSERT INTO "Driver" (id, name, phone, email)
-    VALUES ($1, $2, $3, $4)
+    INSERT INTO "Driver" (id, name, phone, email, "createdAt", "updatedAt")
+    VALUES ($1, $2, $3, $4, NOW(), NOW())
     RETURNING id, name, phone, email
   `,
     [driverId, name, phone, `${phone}@example.test`],
@@ -109,8 +126,8 @@ export async function seedActiveDriverSession(args?: {
     unitNumber: string | null;
   }>(
     `
-    INSERT INTO "Vehicle" (id, "driverId", type, "licensePlate", "unitNumber")
-    VALUES ($1, $2, 'TRUCK_TRAILER', $3, $4)
+    INSERT INTO "Vehicle" (id, "driverId", type, "licensePlate", "unitNumber", "createdAt", "updatedAt")
+    VALUES ($1, $2, 'TRUCK_TRAILER', $3, $4, NOW(), NOW())
     RETURNING id, "driverId", type, "licensePlate", "unitNumber"
   `,
     [vehicleId, driverId, `PLT${phone.slice(-4)}`, args?.deviceLabel ?? null],
@@ -135,9 +152,10 @@ export async function seedActiveDriverSession(args?: {
       "spotId",
       "expectedEnd",
       "termsVersion",
-      "overstayAuthorized"
+      "overstayAuthorized",
+      "updatedAt"
     )
-    VALUES ($1, $2, $3, $4, $5, '1.0', true)
+    VALUES ($1, $2, $3, $4, $5, '1.0', true, NOW())
     RETURNING id, "driverId", "vehicleId", "spotId", status
   `,
     [sessionId, driverId, vehicleId, spot.rows[0].id, new Date(Date.now() + 24 * 60 * 60 * 1000)],

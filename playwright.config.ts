@@ -1,4 +1,9 @@
 import { defineConfig, devices } from "@playwright/test";
+import { config as loadEnv } from "dotenv";
+
+// Load .env.local so TEST_DATABASE_URL is available when running via npm scripts
+// without needing dotenv-cli or manual env injection.
+loadEnv({ path: ".env.local" });
 
 const port = Number(process.env.PLAYWRIGHT_PORT ?? 3100);
 const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://127.0.0.1:${port}`;
@@ -23,10 +28,10 @@ export default defineConfig({
   ],
   webServer: testDatabaseUrl
     ? {
-        command: `npm run dev -- -p ${port}`,
+        command: `npx next build && npx next start -p ${port}`,
         url: baseURL,
         reuseExistingServer: !process.env.CI,
-        timeout: 120_000,
+        timeout: 300_000,
         env: {
           ...process.env,
           DATABASE_URL: testDatabaseUrl,

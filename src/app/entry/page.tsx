@@ -77,7 +77,7 @@ export default function ScanPage() {
   const [gateTriggered, setGateTriggered] = useState(false);
   const [gateDenied, setGateDenied] = useState(false);
   const phoneRef = useRef<HTMLInputElement>(null);
-  const freshScan = useRef(isExternalNavigation());
+  const freshScan = useRef(false);
 
   // Resolve driver state → UI state
   function resolveState(data: DriverStateResponse, currentPhone: string) {
@@ -112,6 +112,13 @@ export default function ScanPage() {
     }
     void currentPhone;
   }
+
+  // Must run first — gate effects below read freshScan.current.
+  // useRef initial value is evaluated during SSR (window === undefined → false),
+  // so we set the real value here on the client after mount.
+  useEffect(() => {
+    freshScan.current = isExternalNavigation();
+  }, []);
 
   // On mount: check localStorage, then verify against server
   useEffect(() => {
