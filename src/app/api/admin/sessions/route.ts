@@ -15,7 +15,7 @@ import { processChargeRefund } from "@/lib/stripe-checkout-service";
 // ---------------------------------------------------------------------------
 const SessionEditBody = z.object({
   sessionId: z.string().min(1),
-  action: z.enum(["extend", "cancel", "close", "adjust", "cancel-subscription", "cancel-monthly-session"]),
+  action: z.enum(["extend", "cancel", "close", "adjust", "cancel-subscription", "cancel-monthly-session", "adjust-monthly-access"]),
   // For extend: how many days to add
   days: z.number().int().min(1).max(365).optional(),
   // For cancel/close: reason required
@@ -40,6 +40,11 @@ const SessionEditBody = z.object({
   refund: z.object({
     mode: z.enum(["none", "unused_time", "full", "custom"]),
     amount: z.number().min(0).max(100_000).optional(),
+  }).optional(),
+  renewalAction: z.enum(["keep", "stop"]).optional(),
+  billingDisposition: z.object({
+    type: z.enum(["comped", "manual_payment"]),
+    reference: z.string().max(500).optional(),
   }).optional(),
 });
 
@@ -247,10 +252,14 @@ export const PUT = handler({ body: SessionEditBody }, async ({ body }) => {
         const maxRefundable = Math.round((p.amount - p.refundedAmount) * 100) / 100;
         if (maxRefundable < 0.01) continue;
         const toRefund = Math.min(remaining, maxRefundable);
+        const toRefundCents = Math.round(toRefund * 100);
         await refundPaymentIntent({
           paymentIntentId: p.stripePaymentIntentId!,
           amount: toRefund,
           reason: "requested_by_customer",
+          // Stable key: same session + payment + amount → Stripe returns the cached refund,
+          // preventing a duplicate charge if the DB write fails and the admin retries.
+          idempotencyKey: `admin_adjust_${sessionId}_${p.id}_${toRefundCents}`,
         });
         refundsIssued.push(`${toRefund.toFixed(2)}`);
         remaining = Math.round((remaining - toRefund) * 100) / 100;
@@ -330,6 +339,287 @@ export const PUT = handler({ body: SessionEditBody }, async ({ body }) => {
     });
 
     return json({ success: true, action: "adjusted", refundsIssued });
+  }
+
+  // ---------------------------------------------------------------------------
+  // adjust-monthly-access — change paid-through/access end date for a monthly
+  // session. Handles shortening (with optional refund + optional sub cancel) and
+  // extension (requires explicit billing disposition so access is never silently
+  // extended for free).
+  // ---------------------------------------------------------------------------
+  if (action === "adjust-monthly-access") {
+    const { effectiveEnd: effectiveEndStr, reason: adjustReason, renewalAction, billingDisposition } = body;
+    const refundReq = body.refund ?? { mode: "none" as const };
+
+    if (!effectiveEndStr) return json({ error: "effectiveEnd is required" }, { status: 400 });
+    const effectiveEnd = new Date(effectiveEndStr);
+    if (isNaN(effectiveEnd.getTime())) return json({ error: "Invalid effectiveEnd date" }, { status: 400 });
+    if (effectiveEnd <= session.startedAt) {
+      return json({ error: "effectiveEnd must be after session startedAt" }, { status: 400 });
+    }
+
+    // Monthly sessions only — resolve subscription ID
+    const monthlyPmt = await prisma.payment.findFirst({
+      where: { sessionId, stripeSubscriptionId: { not: null } },
+      select: { stripeSubscriptionId: true },
+    });
+    const subscriptionId = monthlyPmt?.stripeSubscriptionId ?? null;
+    if (!subscriptionId) {
+      return json({ error: "adjust-monthly-access applies to monthly sessions only" }, { status: 400 });
+    }
+
+    const now = new Date();
+    const isShortening = effectiveEnd < session.expectedEnd;
+    const isExtending  = effectiveEnd > session.expectedEnd;
+
+    if (!isShortening && !isExtending) {
+      return json({ success: true, action: "adjust-monthly-access", changed: false });
+    }
+
+    // ── SHORTENING ────────────────────────────────────────────────────────────
+    if (isShortening) {
+      if (!renewalAction) {
+        return json({ error: "renewalAction ('keep' | 'stop') is required when shortening access end" }, { status: 400 });
+      }
+      if ((refundReq.mode !== "none" || renewalAction === "stop") && !stripeConfigured()) {
+        return json({ error: "Stripe is not configured — cannot process refund or stop renewal" }, { status: 409 });
+      }
+
+      // ── Refund accounting (current period only) ───────────────────────────
+      const refundablePayments = await prisma.payment.findMany({
+        where: {
+          sessionId,
+          type: { in: ["MONTHLY_CHECKIN", "MONTHLY_RENEWAL"] },
+          status: { in: ["COMPLETED", "PARTIALLY_REFUNDED"] },
+          stripePaymentIntentId: { not: null },
+        },
+        orderBy: { createdAt: "desc" },
+        include: { refunds: { select: { amount: true } } },
+      });
+
+      const currentPeriodPayment = refundablePayments[0] ?? null;
+      const actualRefundedSoFar = (p: typeof refundablePayments[0]) =>
+        p.refunds.reduce((s, r) => s + r.amount, 0);
+      const currentPeriodRefundable = currentPeriodPayment
+        ? Math.round(Math.max(0, currentPeriodPayment.amount - actualRefundedSoFar(currentPeriodPayment)) * 100) / 100
+        : 0;
+
+      let resolvedRefund = 0;
+      if (refundReq.mode === "full") {
+        resolvedRefund = currentPeriodRefundable;
+      } else if (refundReq.mode === "custom") {
+        if (!refundReq.amount || refundReq.amount <= 0) {
+          return json({ error: "Custom refund requires a positive amount." }, { status: 400 });
+        }
+        resolvedRefund = Math.round(refundReq.amount * 100) / 100;
+      } else if (refundReq.mode === "unused_time") {
+        // Unused-time = time from effectiveEnd → current expectedEnd, prorated over
+        // the current billing period (from currentPeriodPayment.createdAt → expectedEnd).
+        const paidEnd     = session.expectedEnd;
+        const periodStart = currentPeriodPayment ? currentPeriodPayment.createdAt : session.startedAt;
+        const paidWindowMs = Math.max(1, paidEnd.getTime() - periodStart.getTime());
+        const unusedMs     = Math.max(0, paidEnd.getTime() - effectiveEnd.getTime());
+        const perMsRate    = currentPeriodRefundable / paidWindowMs;
+        resolvedRefund = Math.min(Math.round(unusedMs * perMsRate * 100) / 100, currentPeriodRefundable);
+      }
+
+      if (resolvedRefund > currentPeriodRefundable + 0.005) {
+        throw conflict(
+          `Requested refund $${resolvedRefund.toFixed(2)} exceeds current-period refundable balance $${currentPeriodRefundable.toFixed(2)}.`,
+        );
+      }
+
+      // ── Step 1: refund ────────────────────────────────────────────────────
+      const refundsIssued: string[] = [];
+      if (resolvedRefund > 0.005) {
+        let remaining = resolvedRefund;
+        for (const p of refundablePayments) {
+          if (remaining <= 0.005) break;
+          const maxRefundable = Math.round((p.amount - actualRefundedSoFar(p)) * 100) / 100;
+          if (maxRefundable <= 0.005) continue;
+          const toRefund = Math.min(maxRefundable, remaining);
+          const cents    = Math.round(toRefund * 100);
+          if (!p.stripePaymentIntentId) continue;
+
+          const refund = await refundPaymentIntent({
+            paymentIntentId: p.stripePaymentIntentId,
+            amount: toRefund,
+            reason: "requested_by_customer",
+            idempotencyKey: `admin_adj_monthly_${sessionId}_${p.id}_${cents}`,
+          });
+
+          const newRefundedAmt  = Math.round((actualRefundedSoFar(p) + toRefund) * 100) / 100;
+          const fullyRefunded   = newRefundedAmt >= p.amount - 0.005;
+          await prisma.$transaction([
+            prisma.paymentRefund.create({ data: { paymentId: p.id, stripeRefundId: refund.id, amount: toRefund } }),
+            prisma.payment.update({
+              where: { id: p.id },
+              data: { refundedAmount: newRefundedAmt, refundedAt: new Date(), status: fullyRefunded ? "REFUNDED" : "PARTIALLY_REFUNDED" },
+            }),
+          ]);
+          refundsIssued.push(toRefund.toFixed(2));
+          remaining = Math.round((remaining - toRefund) * 100) / 100;
+
+          // Best-effort QB sync
+          try {
+            const ss = getStripe();
+            let chargeId = p.stripeChargeId ?? null;
+            if (!chargeId) {
+              const pi = await ss.paymentIntents.retrieve(p.stripePaymentIntentId, { expand: ["latest_charge"] });
+              chargeId = typeof pi.latest_charge === "string"
+                ? pi.latest_charge
+                : (pi.latest_charge as { id: string } | null)?.id ?? null;
+              if (chargeId) await prisma.payment.update({ where: { id: p.id }, data: { stripeChargeId: chargeId } });
+            }
+            if (chargeId) {
+              const charge = await ss.charges.retrieve(chargeId, { expand: ["refunds"] });
+              await processChargeRefund(charge, `admin_adj_monthly_${sessionId}`);
+            }
+          } catch (err) { console.error("[admin/sessions] adjust-monthly-access QB sync failed:", err); }
+        }
+
+        await audit({
+          action: "REFUND_ISSUED",
+          sessionId,
+          driverId: session.driverId,
+          details: `Refund $${resolvedRefund.toFixed(2)} issued for monthly access adjustment. Reason: ${adjustReason ?? "—"}`,
+        });
+      }
+
+      // ── Steps 2+3 (sub cancel + session update) — failures return landed state
+      let subLanded = false;
+      let subAlreadyCancelled = false;
+      try {
+        // Step 2: optional subscription cancel
+        if (renewalAction === "stop") {
+          const stripe = getStripe();
+          try {
+            await stripe.subscriptions.cancel(subscriptionId);
+          } catch (subErr: unknown) {
+            const isGone =
+              subErr instanceof Error && (
+                subErr.message.toLowerCase().includes("already been canceled") ||
+                subErr.message.toLowerCase().includes("no such subscription") ||
+                (subErr as { code?: string }).code === "resource_missing" ||
+                (subErr as { code?: string }).code === "already_canceled"
+              );
+            if (!isGone) throw subErr;
+            subAlreadyCancelled = true;
+          }
+        }
+        subLanded = true;
+
+        // Step 3: session row update
+        let newStatus = session.status;
+        let newEndedAt = session.endedAt;
+        let deletedOverstay = 0;
+        if (effectiveEnd <= now) {
+          // Shortening to now/past — end the session
+          newStatus  = "COMPLETED";
+          newEndedAt = effectiveEnd;
+          const gone = await prisma.payment.deleteMany({
+            where: { sessionId, type: "OVERSTAY", createdAt: { gt: effectiveEnd } },
+          });
+          deletedOverstay = gone.count;
+        } else if (session.status === "OVERSTAY") {
+          // Future shortening on an overstay — return to ACTIVE since cron will
+          // re-evaluate when the new expectedEnd passes.
+          newStatus = "ACTIVE";
+        }
+
+        await prisma.session.update({
+          where: { id: sessionId },
+          data: {
+            expectedEnd: effectiveEnd,
+            ...(newEndedAt !== session.endedAt ? { endedAt: newEndedAt } : {}),
+            ...(newStatus  !== session.status  ? { status:  newStatus  } : {}),
+            ...(renewalAction === "stop"        ? { billingStatus: "CURRENT" } : {}),
+          },
+        });
+
+        const renewalNote = renewalAction === "stop"
+          ? (subAlreadyCancelled ? "renewal already cancelled (idempotent)" : "renewal stopped")
+          : "renewal kept";
+        const refundNote  = resolvedRefund > 0.005 ? `$${resolvedRefund.toFixed(2)}` : "none";
+        const overstayNote = deletedOverstay > 0 ? ` Removed ${deletedOverstay} overstay payment(s).` : "";
+        await audit({
+          action: "SPOT_FREED",
+          sessionId,
+          driverId: session.driverId,
+          vehicleId: session.vehicleId,
+          spotId: session.spotId,
+          details:
+            `ADMIN adjusted monthly access end (shortening). ` +
+            `Old: ${session.expectedEnd.toISOString()}. New: ${effectiveEnd.toISOString()}. ` +
+            `Refund: ${refundNote}. Renewal: ${renewalNote}.${overstayNote} ` +
+            `Reason: ${adjustReason ?? "—"}. Driver: ${session.driver.name}, Spot: ${session.spot.label}.`,
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "Unknown failure";
+        return json({
+          error: subLanded
+            ? `Session update failed after subscription action: ${msg}`
+            : `Subscription cancellation failed: ${msg}`,
+          landed: {
+            refund: resolvedRefund > 0.005 ? { amount: resolvedRefund, breakdown: refundsIssued } : null,
+            subscription: subLanded ? (renewalAction === "stop" ? "cancelled" : "unchanged") : "unchanged",
+            session: "unchanged",
+          },
+        }, { status: 500 });
+      }
+
+      return json({
+        success: true,
+        action: "adjust-monthly-access",
+        effectiveEnd: effectiveEnd.toISOString(),
+        refund: { amount: resolvedRefund, breakdown: refundsIssued },
+        renewalAction,
+      });
+    }
+
+    // ── EXTENDING ─────────────────────────────────────────────────────────────
+    if (isExtending) {
+      if (!billingDisposition) {
+        return json(
+          { error: "billingDisposition is required when extending access end — use 'comped' or 'manual_payment' to document the billing decision" },
+          { status: 400 },
+        );
+      }
+      const { type: dispositionType, reference } = billingDisposition;
+      if (dispositionType === "comped" && !adjustReason?.trim()) {
+        return json({ error: "Reason is required for a comped extension" }, { status: 400 });
+      }
+      if (dispositionType === "manual_payment" && !reference?.trim()) {
+        return json({ error: "Reference is required for a manual payment extension" }, { status: 400 });
+      }
+
+      await prisma.session.update({
+        where: { id: sessionId },
+        data: { expectedEnd: effectiveEnd },
+      });
+
+      await audit({
+        action: "SPOT_FREED",
+        sessionId,
+        driverId: session.driverId,
+        vehicleId: session.vehicleId,
+        spotId: session.spotId,
+        details:
+          `ADMIN adjusted monthly access end (extension). ` +
+          `Old: ${session.expectedEnd.toISOString()}. New: ${effectiveEnd.toISOString()}. ` +
+          `Billing: ${dispositionType}${reference ? ` (ref: ${reference.trim()})` : ""}. ` +
+          `Reason: ${adjustReason ?? "—"}. Driver: ${session.driver.name}, Spot: ${session.spot.label}.`,
+      });
+
+      return json({
+        success: true,
+        action: "adjust-monthly-access",
+        effectiveEnd: effectiveEnd.toISOString(),
+        billingDisposition: dispositionType,
+      });
+    }
+
+    return json({ error: "Unexpected state in adjust-monthly-access" }, { status: 500 });
   }
 
   if (action === "cancel-subscription") {
@@ -445,15 +735,17 @@ export const PUT = handler({ body: SessionEditBody }, async ({ body }) => {
         stripePaymentIntentId: { not: null },
       },
       orderBy: { createdAt: "desc" },
+      include: { refunds: { select: { amount: true } } },
     });
 
     // All refund operations are scoped to the most recent billing period only.
     // Prior periods are already reconciled; their refundability is a separate concern.
-    // TODO: once Session.cancellationDisposition exists, expose prior-period refund
-    //       history as a separate admin action rather than bundling it here.
     const currentPeriodPayment = refundablePayments[0] ?? null;
+    // Compute remaining from actual PaymentRefund rows (not the denormalized refundedAmount),
+    // so that a retry after partial failure — where refundedAmount wasn't updated but a
+    // PaymentRefund row was written — correctly skips the Stripe refund call.
     const currentPeriodRefundable = currentPeriodPayment
-      ? Math.round(Math.max(0, currentPeriodPayment.amount - currentPeriodPayment.refundedAmount) * 100) / 100
+      ? Math.round(Math.max(0, currentPeriodPayment.amount - currentPeriodPayment.refunds.reduce((s, r) => s + r.amount, 0)) * 100) / 100
       : 0;
 
     let resolvedRefund = 0;
@@ -511,6 +803,9 @@ export const PUT = handler({ body: SessionEditBody }, async ({ body }) => {
           paymentIntentId: p.stripePaymentIntentId,
           amount: cents / 100,
           reason: "requested_by_customer",
+          // Stable key: same session + payment + amount → Stripe returns the cached refund,
+          // preventing a duplicate charge if the DB write fails and the admin retries.
+          idempotencyKey: `admin_cancel_monthly_${sessionId}_${p.id}_${cents}`,
         });
         const newRefundedAmount = Math.round((p.refundedAmount + toRefund) * 100) / 100;
         const fullyRefunded = newRefundedAmount >= p.amount - 0.005;
@@ -573,18 +868,39 @@ export const PUT = handler({ body: SessionEditBody }, async ({ body }) => {
 
     // From here on, failures leave Stripe-money state already mutated.
     // Surface the partial effects to the client so admin can recover manually.
+    //
+    // Custom-date semantics:
+    //   `now`    — Stripe sub cancelled immediately. Session row set to CANCELLED, endedAt = now.
+    //   `custom` — Stripe sub also cancelled immediately (no Stripe-native "cancel on custom date").
+    //              Parking access continues: session stays ACTIVE with expectedEnd = customDate.
+    //              Cron or overstay flow ends the session when customDate passes.
+    //              Refund (if any) covers unused paid time from customDate → original expectedEnd.
+    //   `period_end` — Stripe marks sub cancel_at_period_end. No session row change; webhook
+    //              completes the session at the next billing boundary.
     const stripe = getStripe();
     let stripeLanded = false;
+    let subAlreadyCancelled = false;
     try {
       // ── Step 2: Stripe subscription action ─────────────────────────────────
-      if (mode === "period_end") {
-        await stripe.subscriptions.update(subscriptionId, { cancel_at_period_end: true });
-        // TODO: schema migration to add BillingStatus.PENDING_CANCELLATION (or
-        // equivalent) so admin UI can show pending-cancel state without
-        // re-querying Stripe. Until then, this state is only visible via Stripe
-        // dashboard + audit.
-      } else {
-        await stripe.subscriptions.cancel(subscriptionId);
+      try {
+        if (mode === "period_end") {
+          await stripe.subscriptions.update(subscriptionId, { cancel_at_period_end: true });
+        } else {
+          // Both `now` and `custom` cancel the Stripe subscription immediately.
+          await stripe.subscriptions.cancel(subscriptionId);
+        }
+      } catch (subErr: unknown) {
+        // Treat already-cancelled subscriptions as success so retries can
+        // proceed to the DB update step (partial-state recovery).
+        const isGone =
+          subErr instanceof Error && (
+            subErr.message.toLowerCase().includes("already been canceled") ||
+            subErr.message.toLowerCase().includes("no such subscription") ||
+            (subErr as { code?: string }).code === "resource_missing" ||
+            (subErr as { code?: string }).code === "already_canceled"
+          );
+        if (!isGone) throw subErr;
+        subAlreadyCancelled = true;
       }
       stripeLanded = true;
 
@@ -632,7 +948,9 @@ export const PUT = handler({ body: SessionEditBody }, async ({ body }) => {
       mode === "period_end" ? `through ${session.expectedEnd.toISOString()}`
       : mode === "now" ? "now"
       : `on ${customDate!.toISOString()}`;
-    const stripeLabel = mode === "period_end" ? "cancel at period end" : "cancelled now";
+    const stripeLabel = mode === "period_end"
+      ? "cancel at period end"
+      : subAlreadyCancelled ? "already cancelled (idempotent retry)" : "cancelled now";
     const refundLabel = resolvedRefund > 0.005 ? `$${resolvedRefund.toFixed(2)}` : "none";
     const auditDetails =
       `ADMIN cancelled monthly session. Stripe: ${stripeLabel}. ` +

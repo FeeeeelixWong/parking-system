@@ -44,6 +44,17 @@ type Props = {
 
 type View = "menu" | "adjust" | "refund" | "cancel";
 
+export type MonthlyAdjustPayload = {
+  effectiveEnd: Date;
+  refund: { mode: RefundOption; amount?: number };
+  renewalAction?: "keep" | "stop";             // required when shortening
+  billingDisposition?: {                        // required when extending
+    type: "comped" | "manual_payment";
+    reference?: string;
+  };
+  reason?: string;
+};
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const ACCENT = "#2D7A4A";
@@ -58,6 +69,11 @@ const INPUT_BG = "#F2F2F7";
 
 function fmtDateTime(d: Date): string {
   return d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+function toDatetimeLocal(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
 function refundablePayments(payments: SessionRow["payments"]) {
@@ -240,7 +256,7 @@ function RefundChoice({
           selected={selected} onSelectedChange={onSelectedChange} />
         <RefundRadioRow
           value="unused_time"
-          label="Refund unused time"
+          label="Refund unused paid time"
           amountStr={`$${Math.max(0, Math.min(unused, refundable)).toFixed(2)}`}
           disabled={refundableZero || unusedZero}
           selected={selected} onSelectedChange={onSelectedChange}
@@ -323,6 +339,455 @@ function UnitStepper({
         {value}
       </span>
       <button style={btnStyle(value >= max)} onClick={() => value < max && onChange(value + 1)}>+</button>
+    </div>
+  );
+}
+
+// ─── MonthlyAdjustView ────────────────────────────────────────────────────────
+// Handles monthly session paid-through/access-end changes.
+// Shortening: requires renewalAction + refund disposition.
+// Extension: requires explicit billing disposition (comped or manual_payment)
+//            so access is never silently extended for free.
+
+function MonthlyAdjustView({
+  session,
+  onSubmit,
+  actionState,
+}: {
+  session: SessionRow;
+  onSubmit: (payload: MonthlyAdjustPayload) => void;
+  actionState: "idle" | "pending" | "success" | "error";
+}) {
+  const currentEnd = new Date(session.expectedEnd);
+  const startedAt  = new Date(session.startedAt);
+
+  // Find the current-period payment for refund computation
+  const currentPeriodPayment = [...session.payments]
+    .filter(
+      (p) =>
+        (p.type === "MONTHLY_CHECKIN" || p.type === "MONTHLY_RENEWAL") &&
+        (p.status === "COMPLETED" || p.status === "PARTIALLY_REFUNDED") &&
+        p.stripePaymentIntentId != null,
+    )
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0] ?? null;
+
+  // Use denormalized refundedAmount for client-side estimate; backend recomputes from PaymentRefund rows.
+  const refundable = currentPeriodPayment
+    ? Math.max(0, Math.round((currentPeriodPayment.amount - (currentPeriodPayment.refundedAmount ?? 0)) * 100) / 100)
+    : 0;
+
+  // ── component state ────────────────────────────────────────────────────────
+  const [newEndStr,   setNewEndStr]   = useState(() => toDatetimeLocal(currentEnd));
+  const [renewalAct,  setRenewalAct]  = useState<"keep" | "stop" | null>(null);
+  const [refundOpt,   setRefundOpt]   = useState<RefundOption>("none");
+  const [customAmt,   setCustomAmt]   = useState("");
+  const [disposition, setDisposition] = useState<"comped" | "manual_payment" | null>(null);
+  const [dispRef,     setDispRef]     = useState("");
+  const [reason,      setReason]      = useState("");
+
+  // Reset renewal/refund/disposition when date changes
+  const handleDateChange = (v: string) => {
+    setNewEndStr(v);
+    setRenewalAct(null);
+    setRefundOpt("none");
+    setCustomAmt("");
+    setDisposition(null);
+    setDispRef("");
+  };
+
+  // ── derived values ─────────────────────────────────────────────────────────
+  const newEnd = (() => {
+    if (!newEndStr) return null;
+    const d = new Date(newEndStr);
+    return isNaN(d.getTime()) ? null : d;
+  })();
+  const dateValid   = newEnd != null && newEnd > startedAt;
+  const isShortening = newEnd != null && newEnd < currentEnd;
+  const isExtending  = newEnd != null && newEnd > currentEnd;
+  const isSame       = newEnd != null && Math.abs(newEnd.getTime() - currentEnd.getTime()) < 60_000;
+  const endsNow      = isShortening && newEnd != null && newEnd <= new Date();
+
+  // Compute client-side refund estimate (server recomputes authoritatively)
+  const periodStart = currentPeriodPayment ? new Date(currentPeriodPayment.createdAt) : startedAt;
+  const paidWindowMs = Math.max(1, currentEnd.getTime() - periodStart.getTime());
+  const unusedProrated = isShortening && newEnd
+    ? Math.min(
+        Math.round(Math.max(0, currentEnd.getTime() - newEnd.getTime()) / paidWindowMs * refundable * 100) / 100,
+        refundable,
+      )
+    : 0;
+
+  const customAmtNum = parseFloat(customAmt);
+  const customAmtValid = refundOpt === "custom" && !isNaN(customAmtNum) && customAmtNum > 0 && customAmtNum <= refundable;
+
+  // Resolved display refund amount
+  const displayRefund =
+    refundOpt === "none"        ? 0
+    : refundOpt === "full"       ? refundable
+    : refundOpt === "unused_time"? unusedProrated
+    : customAmtValid              ? customAmtNum
+    : 0;
+
+  // Reason required when: no refund but money exists, custom amount, stop renewal, or ending now
+  const reasonRequired = isShortening && (
+    (refundOpt === "none" && refundable > 0.005) ||
+    refundOpt === "custom" ||
+    renewalAct === "stop" ||
+    endsNow
+  );
+
+  // canSubmit
+  const canSubmit = (() => {
+    if (!dateValid || isSame || actionState === "pending") return false;
+    if (isShortening) {
+      if (!renewalAct) return false;
+      if (refundOpt === "custom" && !customAmtValid) return false;
+      if (reasonRequired && !reason.trim()) return false;
+      return true;
+    }
+    if (isExtending) {
+      if (!disposition) return false;
+      if (disposition === "comped" && !reason.trim()) return false;
+      if (disposition === "manual_payment" && !dispRef.trim()) return false;
+      return true;
+    }
+    return false;
+  })();
+
+  // ── submit ────────────────────────────────────────────────────────────────
+  const handleSubmit = () => {
+    if (!canSubmit || !newEnd) return;
+    const payload: MonthlyAdjustPayload = {
+      effectiveEnd: newEnd,
+      refund: {
+        mode: isExtending ? "none" : refundOpt,
+        amount: refundOpt === "custom" && customAmtValid ? customAmtNum : undefined,
+      },
+      ...(isShortening ? { renewalAction: renewalAct! } : {}),
+      ...(isExtending  ? { billingDisposition: { type: disposition!, reference: dispRef.trim() || undefined } } : {}),
+      reason: reason.trim() || undefined,
+    };
+    onSubmit(payload);
+  };
+
+  // ── submit label ──────────────────────────────────────────────────────────
+  const submitLabel = (() => {
+    if (actionState === "pending") return "Saving…";
+    if (actionState === "success") return "Saved";
+    if (actionState === "error")   return "Retry";
+    if (isExtending) {
+      return disposition === "manual_payment"
+        ? "Extend Paid-Through Date (Manual Payment)"
+        : "Extend Paid-Through Date (Comped)";
+    }
+    return displayRefund > 0.005
+      ? `Adjust Paid-Through Date With $${displayRefund.toFixed(2)} Refund`
+      : "Adjust Paid-Through Date Without Refund";
+  })();
+
+  const isDestructive = isShortening && (renewalAct === "stop" || displayRefund > 0.005);
+
+  // ── render ────────────────────────────────────────────────────────────────
+  const sectionLabel: React.CSSProperties = {
+    fontSize: 10, fontWeight: 700, color: MUTED,
+    textTransform: "uppercase", letterSpacing: "0.05em",
+    marginBottom: 8,
+  };
+  const cardStyle: React.CSSProperties = {
+    background: INPUT_BG, borderRadius: 8, padding: "12px 14px",
+  };
+  const infoNote: React.CSSProperties = {
+    fontSize: 12, color: MUTED, border: `1px solid ${BORDER}`,
+    borderRadius: 6, padding: "8px 12px", lineHeight: 1.5,
+  };
+
+  return (
+    <div style={{ maxWidth: 460 }}>
+      {/* ── Date picker ──────────────────────────────────────────────────── */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 20 }}>
+        <div style={cardStyle}>
+          <div style={sectionLabel}>Current access end</div>
+          <div style={{ fontSize: 13, color: FG }}>{fmtDateTime(currentEnd)}</div>
+        </div>
+        <div style={{ ...cardStyle, background: newEnd && !isSame ? (isShortening ? "#FEF3C7" : "#ECFDF5") : INPUT_BG }}>
+          <div style={sectionLabel}>New access end</div>
+          <div style={{ fontSize: 13, color: newEnd ? FG : MUTED }}>
+            {newEnd && !isSame ? fmtDateTime(newEnd) : "—"}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ marginBottom: 20 }}>
+        <label style={sectionLabel}>New access end date *</label>
+        <input
+          type="datetime-local"
+          value={newEndStr}
+          onChange={(e) => handleDateChange(e.target.value)}
+          style={{
+            width: "100%", padding: "8px 10px", fontSize: 13,
+            border: `1px solid ${dateValid || !newEndStr ? BORDER : DANGER}`,
+            borderRadius: 6, background: CARD_BG, color: FG, outline: "none",
+            boxSizing: "border-box",
+          }}
+        />
+        {newEnd && !dateValid && (
+          <div style={{ fontSize: 11, color: DANGER, marginTop: 4 }}>
+            Must be after session start ({fmtDateTime(startedAt)}).
+          </div>
+        )}
+        {isSame && (
+          <div style={{ fontSize: 11, color: MUTED, marginTop: 4 }}>
+            Same as current access end — no change would occur.
+          </div>
+        )}
+      </div>
+
+      {/* ═══════════════════════ SHORTENING ════════════════════════════════ */}
+      {isShortening && (
+        <>
+          {/* A: Access effect */}
+          <div style={{ marginBottom: 20 }}>
+            <div style={sectionLabel}>Access effect</div>
+            <div style={{
+              fontSize: 12, borderRadius: 6, padding: "10px 12px", lineHeight: 1.5,
+              background: endsNow ? "#FEF2F2" : "#FEF3C7",
+              border: `1px solid ${endsNow ? DANGER : "#D97706"}`,
+              color: endsNow ? DANGER : "#92400E",
+            }}>
+              {endsNow
+                ? "Parking access ends immediately (chosen date is now or in the past)."
+                : `Parking access will end on ${fmtDateTime(newEnd!)}.`}
+            </div>
+          </div>
+
+          {/* B: Future renewal */}
+          <div style={{ marginBottom: 20 }}>
+            <div style={sectionLabel}>Future Stripe renewal *</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {(["keep", "stop"] as const).map((opt) => {
+                const selected = renewalAct === opt;
+                return (
+                  <label key={opt} style={{
+                    display: "flex", alignItems: "flex-start", gap: 10,
+                    padding: "10px 12px", borderRadius: 6, cursor: "pointer",
+                    background: selected ? (opt === "stop" ? "#FEF2F2" : "#ECFDF5") : "transparent",
+                    border: `1px solid ${selected ? (opt === "stop" ? DANGER : ACCENT) : BORDER}`,
+                  }}>
+                    <input
+                      type="radio"
+                      name="renewalAct"
+                      checked={selected}
+                      onChange={() => setRenewalAct(opt)}
+                      style={{ width: 14, height: 14, accentColor: opt === "stop" ? DANGER : ACCENT, marginTop: 1, flexShrink: 0 }}
+                    />
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: selected && opt === "stop" ? DANGER : FG }}>
+                        {opt === "keep" ? "Keep renewal active" : "Stop future renewal"}
+                      </div>
+                      <div style={{ fontSize: 11, color: MUTED, marginTop: 2, lineHeight: 1.4 }}>
+                        {opt === "keep"
+                          ? "Only the current access end changes. Stripe will still renew on its normal schedule."
+                          : `Stripe subscription cancelled immediately. No future charges. Parking access remains until ${fmtDateTime(newEnd!)}.`}
+                      </div>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* C: Refund */}
+          <div style={{ marginBottom: 20 }}>
+            <div style={sectionLabel}>Refund — current billing period</div>
+            {refundable > 0.005 ? (
+              <RefundChoice
+                totalPaid={currentPeriodPayment?.amount ?? refundable}
+                refunded={currentPeriodPayment ? (currentPeriodPayment.refundedAmount ?? 0) : 0}
+                refundable={refundable}
+                unused={unusedProrated}
+                selected={refundOpt}
+                onSelectedChange={(v: RefundOption) => { setRefundOpt(v); setCustomAmt(""); }}
+                customAmount={customAmt}
+                onCustomChange={setCustomAmt}
+              />
+            ) : (
+              <div style={infoNote}>No refundable balance in the current billing period.</div>
+            )}
+          </div>
+
+          <div style={{ ...infoNote, marginBottom: 20 }}>
+            No refund is issued from Adjust Session unless you choose one above.
+            Use <strong>Cancel Session</strong> if ending access now with refund/retention disposition.
+          </div>
+
+          {/* D: Reason (conditional) */}
+          {reasonRequired && (
+            <div style={{ marginBottom: 20 }}>
+              <label style={sectionLabel}>Reason *</label>
+              <input
+                type="text"
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                placeholder={
+                  endsNow ? "Why end access now?"
+                  : refundOpt === "none" && refundable > 0.005 ? "Why no refund?"
+                  : renewalAct === "stop" ? "Why stop renewal?"
+                  : "Reason for adjustment"
+                }
+                maxLength={300}
+                style={{
+                  width: "100%", padding: "9px 12px", fontSize: 13,
+                  border: `1px solid ${BORDER}`, borderRadius: 6,
+                  background: CARD_BG, color: FG, outline: "none",
+                  boxSizing: "border-box",
+                }}
+              />
+            </div>
+          )}
+        </>
+      )}
+
+      {/* ═══════════════════════ EXTENDING ═════════════════════════════════ */}
+      {isExtending && (
+        <>
+          <div style={{ ...infoNote, marginBottom: 20 }}>
+            This extends parking access only. Stripe billing renewal schedule is unchanged.
+          </div>
+
+          <div style={{ marginBottom: 20 }}>
+            <div style={sectionLabel}>Billing disposition *</div>
+            <div style={{ fontSize: 11, color: MUTED, marginBottom: 10, lineHeight: 1.4 }}>
+              Monthly access can only be extended with an explicit billing record — it cannot be
+              silently extended for free. Choose how this extension was billed.
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {([
+                {
+                  value: "comped" as const,
+                  label: "Comped (no charge)",
+                  desc: "Access extended at no cost to the driver. Reason required.",
+                },
+                {
+                  value: "manual_payment" as const,
+                  label: "Manual payment collected",
+                  desc: "Payment was collected outside the system. Reference required (check #, cash log, etc.).",
+                },
+              ]).map(({ value: opt, label, desc }) => {
+                const selected = disposition === opt;
+                return (
+                  <label key={opt} style={{
+                    display: "flex", alignItems: "flex-start", gap: 10,
+                    padding: "10px 12px", borderRadius: 6, cursor: "pointer",
+                    background: selected ? "#ECFDF5" : "transparent",
+                    border: `1px solid ${selected ? ACCENT : BORDER}`,
+                  }}>
+                    <input
+                      type="radio"
+                      name="disposition"
+                      checked={selected}
+                      onChange={() => { setDisposition(opt); setReason(""); setDispRef(""); }}
+                      style={{ width: 14, height: 14, accentColor: ACCENT, marginTop: 1, flexShrink: 0 }}
+                    />
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: FG }}>{label}</div>
+                      <div style={{ fontSize: 11, color: MUTED, marginTop: 2, lineHeight: 1.4 }}>{desc}</div>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+
+          {disposition === "comped" && (
+            <div style={{ marginBottom: 20 }}>
+              <label style={sectionLabel}>Reason *</label>
+              <input
+                type="text"
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                placeholder="Why is this extension comped?"
+                maxLength={300}
+                style={{
+                  width: "100%", padding: "9px 12px", fontSize: 13,
+                  border: `1px solid ${BORDER}`, borderRadius: 6,
+                  background: CARD_BG, color: FG, outline: "none",
+                  boxSizing: "border-box",
+                }}
+              />
+            </div>
+          )}
+
+          {disposition === "manual_payment" && (
+            <div style={{ marginBottom: 20 }}>
+              <label style={sectionLabel}>Payment reference *</label>
+              <input
+                type="text"
+                value={dispRef}
+                onChange={(e) => setDispRef(e.target.value)}
+                placeholder="Check #, cash log entry, receipt #, etc."
+                maxLength={300}
+                style={{
+                  width: "100%", padding: "9px 12px", fontSize: 13,
+                  border: `1px solid ${BORDER}`, borderRadius: 6,
+                  background: CARD_BG, color: FG, outline: "none",
+                  boxSizing: "border-box",
+                }}
+              />
+            </div>
+          )}
+        </>
+      )}
+
+      {/* ── Effects summary ──────────────────────────────────────────────── */}
+      {newEnd && dateValid && !isSame && (isShortening || isExtending) && (
+        <div style={{ ...cardStyle, marginBottom: 20, fontSize: 12 }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: MUTED, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>
+            Effects
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", rowGap: 5, columnGap: 14 }}>
+            <span style={{ color: MUTED }}>Access end</span>
+            <span style={{ color: FG }}>{fmtDateTime(newEnd)}</span>
+            {isShortening && (
+              <>
+                <span style={{ color: MUTED }}>Stripe renewal</span>
+                <span style={{ color: renewalAct === "stop" ? DANGER : FG }}>
+                  {renewalAct === "stop" ? "Cancelled immediately" : renewalAct === "keep" ? "Continues as scheduled" : "—"}
+                </span>
+                <span style={{ color: MUTED }}>Refund</span>
+                <span style={{ color: displayRefund > 0.005 ? ACCENT : MUTED }}>
+                  {displayRefund > 0.005 ? `$${displayRefund.toFixed(2)}` : "None"}
+                </span>
+              </>
+            )}
+            {isExtending && (
+              <>
+                <span style={{ color: MUTED }}>Billing</span>
+                <span style={{ color: FG }}>
+                  {disposition === "comped"          ? "Comped"
+                  : disposition === "manual_payment" ? `Manual payment${dispRef.trim() ? ` (${dispRef.trim()})` : ""}`
+                  : "—"}
+                </span>
+                <span style={{ color: MUTED }}>Stripe renewal</span>
+                <span style={{ color: MUTED }}>Unchanged</span>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Submit ───────────────────────────────────────────────────────── */}
+      <button
+        onClick={handleSubmit}
+        disabled={!canSubmit}
+        style={{
+          width: "100%", padding: "12px 0", borderRadius: 8, border: "none",
+          background: canSubmit ? (isDestructive ? DANGER : ACCENT) : "#C7C7CC",
+          color: "#fff", fontSize: 14, fontWeight: 600,
+          cursor: canSubmit ? "pointer" : "not-allowed",
+        }}
+      >
+        {submitLabel}
+      </button>
     </div>
   );
 }
@@ -1264,6 +1729,54 @@ export default function ManageSessionModal({ session, settings, onClose, onSucce
     }
   }
 
+  async function callAdjustMonthlyAccess(payload: MonthlyAdjustPayload) {
+    setActionState("pending");
+    setActionError(null);
+    try {
+      const body: Record<string, unknown> = {
+        sessionId: session.id,
+        action: "adjust-monthly-access",
+        effectiveEnd: payload.effectiveEnd.toISOString(),
+        refund: payload.refund,
+        ...(payload.renewalAction       ? { renewalAction: payload.renewalAction } : {}),
+        ...(payload.billingDisposition  ? { billingDisposition: payload.billingDisposition } : {}),
+        ...(payload.reason              ? { reason: payload.reason } : {}),
+      };
+      const res = await fetch("/api/admin/sessions", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        const detail = j.landed
+          ? ` (partial: refund=${JSON.stringify(j.landed.refund)}, sub=${j.landed.subscription})`
+          : "";
+        throw new Error((j.error || "Request failed") + detail);
+      }
+      if (!mountedRef.current) return;
+      setActionState("success");
+      const refAmt = payload.refund.mode !== "none" && payload.refund.mode !== "unused_time"
+        ? payload.refund.amount
+        : undefined;
+      addToast({
+        type: "success",
+        message: refAmt
+          ? `Access end adjusted · $${refAmt.toFixed(2)} refund issued`
+          : "Access end adjusted",
+      });
+      await new Promise((r) => setTimeout(r, 600));
+      onSuccess();
+      onClose();
+    } catch (e) {
+      if (!mountedRef.current) return;
+      const msg = e instanceof Error ? e.message : "Something went wrong";
+      setActionError(msg);
+      setActionState("error");
+      addToast({ type: "error", message: `Monthly access adjustment failed · ${msg}` });
+    }
+  }
+
   async function callRefund(amount: number, reason?: string) {
     setActionState("pending");
     setActionError(null);
@@ -1507,7 +2020,14 @@ export default function ManageSessionModal({ session, settings, onClose, onSucce
         <div style={{ flex: 1, overflowY: "auto", padding: "24px 28px" }}>
           {errorBanner}
 
-          {view === "adjust" && (
+          {view === "adjust" && isMonthly && (
+            <MonthlyAdjustView
+              session={session}
+              onSubmit={callAdjustMonthlyAccess}
+              actionState={actionState}
+            />
+          )}
+          {view === "adjust" && !isMonthly && (
             <AdjustView
               session={session}
               settings={settings}
