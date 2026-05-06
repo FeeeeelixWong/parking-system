@@ -49,10 +49,12 @@ export const POST = handler(
       );
     }
 
+    const amountCents = body.amount != null ? Math.round(body.amount * 100) : "full";
     const refund = await refundPaymentIntent({
       paymentIntentId: payment.stripePaymentIntentId,
       amount: body.amount,
       reason: body.reason,
+      idempotencyKey: `admin_refund_${payment.id}_${amountCents}`,
     });
 
     await audit({

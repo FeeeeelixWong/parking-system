@@ -151,7 +151,7 @@ function PaymentCompleteContent() {
         )}
         {ui.kind === "error" && (
           <Block
-            icon="✕"
+            icon="×"
             iconColor="var(--error)"
             title="Something went wrong"
             messages={[ui.message]}

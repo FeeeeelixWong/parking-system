@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback } from "react";
+import NeedsReviewTab from "./NeedsReviewTab";
 import ReconcileTab from "./ReconcileTab";
 import ChargesReceiptsTab from "./ChargesReceiptsTab";
 
@@ -11,11 +12,12 @@ const ACCENT = "#2D7A4A";
 const ACCENT_LIGHT = "#EDF7F1";
 const WARN_DOT = "#F59E0B";
 
-type SubTab = "sessions" | "charges-receipts";
+type SubTab = "needs-review" | "sessions" | "charges-receipts";
 
 const SUBTABS: { key: SubTab; label: string; description: string }[] = [
-  { key: "sessions",          label: "Sessions",           description: "Payment chain integrity" },
-  { key: "charges-receipts",  label: "Charges & Receipts", description: "Stripe ↔ QuickBooks" },
+  { key: "needs-review",     label: "Needs Review",        description: "Admin action queue" },
+  { key: "sessions",         label: "Sessions Ledger",     description: "Payment chain integrity" },
+  { key: "charges-receipts", label: "Stripe vs QuickBooks", description: "Receipt matching" },
 ];
 
 function IssueDot() {
@@ -33,7 +35,7 @@ function IssueDot() {
 }
 
 export default function ReconcileView({ mobile }: { mobile: boolean }) {
-  const [subTab, setSubTab] = useState<SubTab>("sessions");
+  const [subTab, setSubTab] = useState<SubTab>("needs-review");
   const [issueMap, setIssueMap] = useState<Partial<Record<SubTab, boolean>>>({});
 
   const setIssues = useCallback((key: SubTab, v: boolean) => {
@@ -76,6 +78,7 @@ export default function ReconcileView({ mobile }: { mobile: boolean }) {
             );
           })}
         </div>
+        {subTab === "needs-review"     && <NeedsReviewTab mobile onHasIssues={(v) => setIssues("needs-review", v)} />}
         {subTab === "sessions"         && <ReconcileTab mobile onHasIssues={(v) => setIssues("sessions", v)} />}
         {subTab === "charges-receipts" && <ChargesReceiptsTab mobile onHasIssues={(v) => setIssues("charges-receipts", v)} />}
       </div>
@@ -150,6 +153,7 @@ export default function ReconcileView({ mobile }: { mobile: boolean }) {
 
       {/* Content */}
       <div style={{ flex: 1, minWidth: 0 }}>
+        {subTab === "needs-review"     && <NeedsReviewTab mobile={false} onHasIssues={(v) => setIssues("needs-review", v)} />}
         {subTab === "sessions"         && <ReconcileTab mobile={false} onHasIssues={(v) => setIssues("sessions", v)} />}
         {subTab === "charges-receipts" && <ChargesReceiptsTab mobile={false} onHasIssues={(v) => setIssues("charges-receipts", v)} />}
       </div>

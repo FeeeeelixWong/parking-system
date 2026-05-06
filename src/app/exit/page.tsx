@@ -399,7 +399,7 @@ function GateOpenedView({
 function ExitedView() {
   return (
     <div style={styles.center}>
-      <div style={styles.successMark}>✓</div>
+      <div style={styles.successMark} />
       <p style={styles.heading}>Overstay settled</p>
       <p style={styles.hint}>Drive safe!</p>
       <p style={{ ...styles.hint, marginTop: 32 }}>

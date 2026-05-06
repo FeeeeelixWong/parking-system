@@ -58,7 +58,7 @@ function QBConnectionStatus() {
         </div>
         {tokenExpiringSoon && (
           <div style={{ marginTop: 8, padding: "6px 10px", borderRadius: 6, background: "#FEF3C7", border: "1px solid #D97706", fontSize: 12, color: "#92400E" }}>
-            ⚠ QB token expires within 14 days — reconnect soon to avoid payment failures.
+            QB token expires within 14 days — reconnect soon to avoid payment failures.
           </div>
         )}
         <button
@@ -233,7 +233,7 @@ function AllowListManager({ mobile }: { mobile: boolean }) {
                 onClick={() => handleDelete(e.id)}
                 style={{ padding: "4px 10px", borderRadius: 4, border: "1px solid #DC262640", background: "transparent", color: "#DC2626", fontSize: 11, cursor: "pointer" }}
               >
-                ✕
+                Remove
               </button>
             </div>
           ))}
@@ -372,7 +372,7 @@ export default function SettingsTab({
               placeholder="Enter the terms drivers must accept to check in..."
             />
             <div style={{ fontSize: 10, color: "#92400E", marginTop: 6 }}>
-              ⚠ Have a Texas attorney review this text before production. Clickwrap consent is only enforceable if the terms are clear and the driver actively agrees.
+              Have a Texas attorney review this text before production. Clickwrap consent is only enforceable if the terms are clear and the driver actively agrees.
             </div>
           </div>
         </SettingsGroup>

@@ -217,13 +217,17 @@ export async function refundPaymentIntent(args: {
   paymentIntentId: string;
   amount?: number; // dollars; omitted = full refund
   reason?: string;
+  idempotencyKey?: string;
 }): Promise<Stripe.Refund> {
   const stripe = getStripe();
-  return stripe.refunds.create({
-    payment_intent: args.paymentIntentId,
-    amount: args.amount != null ? Math.round(args.amount * 100) : undefined,
-    reason: args.reason as Stripe.RefundCreateParams.Reason | undefined,
-  });
+  return stripe.refunds.create(
+    {
+      payment_intent: args.paymentIntentId,
+      amount: args.amount != null ? Math.round(args.amount * 100) : undefined,
+      reason: args.reason as Stripe.RefundCreateParams.Reason | undefined,
+    },
+    args.idempotencyKey ? { idempotencyKey: args.idempotencyKey } : undefined,
+  );
 }
 
 // ---------------------------------------------------------------------------

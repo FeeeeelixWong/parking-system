@@ -1,16 +1,17 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useSyncExternalStore } from "react";
 import { QRCodeSVG } from "qrcode.react";
 
 export default function Home() {
-  const [entryUrl] = useState(() =>
-    typeof window !== "undefined" ? `${window.location.origin}/entry` : ""
+  const origin = useSyncExternalStore(
+    () => () => {},
+    () => window.location.origin,
+    () => "",
   );
-  const [exitUrl] = useState(() =>
-    typeof window !== "undefined" ? `${window.location.origin}/exit` : ""
-  );
+  const entryUrl = origin ? `${origin}/entry` : "";
+  const exitUrl = origin ? `${origin}/exit` : "";
 
   return (
     <div
@@ -76,14 +77,8 @@ export default function Home() {
               height: 44,
               borderRadius: 12,
               background: "var(--dark-green)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontSize: 22,
               flexShrink: 0,
-            }}>
-              🔓
-            </div>
+            }} />
             <div>
               <div style={{
                 fontSize: 17,
@@ -124,14 +119,8 @@ export default function Home() {
                 height: 44,
                 borderRadius: 12,
                 background: "var(--dark-blue)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                fontSize: 22,
                 flexShrink: 0,
-              }}>
-                🚛
-              </div>
+              }} />
               <div>
                 <div style={{
                   fontSize: 17,
@@ -164,9 +153,9 @@ export default function Home() {
         </Link>
 
         {/* Secondary cards */}
-        <SecondaryCard href="/lot" icon="🗺️" title="Lot Map" subtitle="View & edit parking lot layout" />
-        <SecondaryCard href="/checkin" icon="📋" title="Check In" subtitle="Full flow with payment" />
-        <SecondaryCard href="/admin" icon="⚙️" title="Admin" subtitle="Dashboard & session history" />
+        <SecondaryCard href="/lot" title="Lot Map" subtitle="View & edit parking lot layout" />
+        <SecondaryCard href="/checkin" title="Check In" subtitle="Full flow with payment" />
+        <SecondaryCard href="/admin" title="Admin" subtitle="Dashboard & session history" />
       </div>
     </div>
   );
@@ -186,8 +175,8 @@ function QRCard({ url, label, sublabel, color }: { url: string; label: string; s
       flex: "1 1 180px",
       maxWidth: 200,
     }}>
-      <div style={{ background: "#fff", padding: 10, borderRadius: 8, lineHeight: 0 }}>
-        <QRCodeSVG value={url} size={120} />
+      <div style={{ background: "#fff", padding: 10, borderRadius: 8, lineHeight: 0, minWidth: 120, minHeight: 120 }}>
+        {url && <QRCodeSVG value={url} size={120} />}
       </div>
       <div style={{ textAlign: "center" }}>
         <div style={{
@@ -214,12 +203,10 @@ function QRCard({ url, label, sublabel, color }: { url: string; label: string; s
 
 function SecondaryCard({
   href,
-  icon,
   title,
   subtitle,
 }: {
   href: string;
-  icon: string;
   title: string;
   subtitle: string;
 }) {
@@ -235,10 +222,8 @@ function SecondaryCard({
           cursor: "pointer",
           display: "flex",
           alignItems: "center",
-          gap: 14,
         }}
       >
-        <span style={{ fontSize: 24 }}>{icon}</span>
         <div>
           <div style={{
             fontSize: 15,

@@ -2,6 +2,8 @@ import { prisma } from "@/lib/prisma";
 import { requireAdmin } from "@/lib/auth";
 import { getStripe, stripeConfigured } from "@/lib/stripe";
 import { handler, json } from "@/lib/api-handler";
+import { getSettings } from "@/lib/settings";
+import { RECONCILE_ISSUE_DEFINITIONS, type NeedsReviewCode } from "@/types/reconcile";
 
 type ReconcileHealth = "ok" | "warning" | "critical";
 
@@ -30,6 +32,7 @@ type ReconcilePaymentRow = {
 export type ReconcileSessionRow = {
   id: string;
   health: ReconcileHealth;
+  issueCodes: NeedsReviewCode[];
   issues: string[];
   sessionType: "MONTHLY" | "DAILY";
   driver: { id: string; name: string };
@@ -37,6 +40,7 @@ export type ReconcileSessionRow = {
   spot: { label: string } | null;
   status: string;
   startedAt: string;
+  billingStatus: string;
   payments: ReconcilePaymentRow[];
   stripeInvoiceCount?: number;
   dbPaymentCount?: number;
@@ -168,6 +172,7 @@ export const GET = handler({}, async ({ req }) => {
     ]);
   }
 
+  const settings = await getSettings();
   const rows: ReconcileSessionRow[] = [];
 
   for (const session of sessions) {
@@ -176,89 +181,120 @@ export const GET = handler({}, async ({ req }) => {
     );
 
     const issues: string[] = [];
-    let health: ReconcileHealth = "ok";
+    const issueCodes: NeedsReviewCode[] = [];
+    let stripeInvoiceCount: number | undefined;
+    let dbPaymentCount: number | undefined;
+    const addIssue = (code: NeedsReviewCode, message: string) => {
+      issueCodes.push(code);
+      issues.push(message);
+    };
 
-    // Check 1: zero payments on a completed session
-    if (session.status === "COMPLETED" && session.payments.length === 0) {
-      issues.push("No payments recorded");
-      health = worstHealth(health, "critical");
-    }
-
-    // Check 2: per-payment integrity
-    for (const p of session.payments) {
-      if (!p.stripeChargeId && !p.stripePaymentIntentId) {
-        issues.push("No Stripe charge recorded — webhook may have been missed");
-        health = worstHealth(health, "critical");
-      } else if (p.stripeChargeId && !p.qbSalesReceiptId) {
-        issues.push("QB Sales Receipt missing");
-        health = worstHealth(health, "warning");
-      }
-
-      // Amount-mismatch checks (only when we have live Stripe data)
-      if (p.stripeChargeId && chargeAmountMap.has(p.stripeChargeId)) {
-        const stripeAmt = chargeAmountMap.get(p.stripeChargeId)!;
-
-        // Check 2a: DB payment amount vs Stripe charge amount
-        if (Math.abs(p.amount - stripeAmt) > 0.01) {
-          issues.push(
-            `DB amount (${fmt(p.amount)}) differs from Stripe charge (${fmt(stripeAmt)}) — possible webhook bug`,
-          );
-          health = worstHealth(health, "critical");
-        }
-
-        // Check 2b: QB Sales Receipt amount vs Stripe charge amount
-        if (p.qbSalesReceiptAmount != null && Math.abs(p.qbSalesReceiptAmount - stripeAmt) > 0.01) {
-          issues.push(
-            `QB Sales Receipt amount (${fmt(p.qbSalesReceiptAmount)}) differs from Stripe charge (${fmt(stripeAmt)})`,
-          );
-          health = worstHealth(health, "warning");
-        }
-      }
-
-      for (const r of p.refunds) {
-        if (!r.qbRefundReceiptId) {
-          issues.push("QB Refund Receipt missing");
-          health = worstHealth(health, "warning");
-        }
-
-        // Check 2c: QB Refund Receipt amount vs Stripe refund amount
-        if (r.stripeRefundId && refundAmountMap.has(r.stripeRefundId) && r.qbRefundReceiptAmount != null) {
-          const stripeRefundAmt = refundAmountMap.get(r.stripeRefundId)!;
-          if (Math.abs(r.qbRefundReceiptAmount - stripeRefundAmt) > 0.01) {
-            issues.push(
-              `QB Refund Receipt amount (${fmt(r.qbRefundReceiptAmount)}) differs from Stripe refund (${fmt(stripeRefundAmt)})`,
-            );
-            health = worstHealth(health, "warning");
+    if (session.status === "CANCELLED") {
+      // CANCELLED sessions: only flag retained money when the admin has not
+      // recorded whether it was refunded, partially refunded, or intentionally kept.
+      if (session.cancellationDisposition === "N_A") {
+        for (const p of session.payments) {
+          if (p.amount > 0 && p.stripeChargeId && p.status !== "REFUNDED" && p.refunds.length === 0) {
+            addIssue("CANCELLED_SESSION_WITH_UNRECONCILED_CHARGE", "Cancelled paid session needs refund/retention disposition");
           }
         }
       }
-
-      if ((p.status === "REFUNDED" || p.status === "PARTIALLY_REFUNDED") && p.refunds.length === 0) {
-        issues.push("Refund recorded on payment but no refund detail row — charge.refunded webhook may have been missed");
-        health = worstHealth(health, "warning");
+    } else {
+      // Check 1: zero payments on a completed session
+      if (session.status === "COMPLETED" && session.payments.length === 0) {
+        addIssue("COMPLETED_SESSION_WITHOUT_PAYMENT", "No payments recorded");
       }
-    }
 
-    // Check 3: monthly — Stripe invoice count vs DB payment count
-    let stripeInvoiceCount: number | undefined;
-    let dbPaymentCount: number | undefined;
-    if (isMonthly) {
-      const monthlyPayments = session.payments.filter(
-        (p) => p.type === "MONTHLY_CHECKIN" || p.type === "MONTHLY_RENEWAL",
-      );
-      dbPaymentCount = monthlyPayments.length;
+      // Check: subscription billing failure
+      if (session.billingStatus === "PAYMENT_FAILED") {
+        addIssue("SUBSCRIPTION_PAYMENT_FAILED", "Subscription payment failed — renewal overdue");
+      }
+      if (session.billingStatus === "DELINQUENT") {
+        addIssue("SUBSCRIPTION_DELINQUENT", "Subscription delinquent — multiple payment failures");
+      }
 
-      if (invoiceCountMap.has(session.id)) {
-        stripeInvoiceCount = invoiceCountMap.get(session.id);
-        if (stripeInvoiceCount !== undefined && stripeInvoiceCount > dbPaymentCount) {
-          const diff = stripeInvoiceCount - dbPaymentCount;
-          issues.push(
-            `${diff} Stripe invoice${diff > 1 ? "s" : ""} ha${diff > 1 ? "ve" : "s"} no matching payment row`,
-          );
-          health = worstHealth(health, "warning");
+      // Check: ACTIVE session past expectedEnd + grace window (cron may not have run)
+      const graceMs = settings.gracePeriodMinutes * 60 * 1000;
+      const graceThreshold = new Date(Date.now() - graceMs);
+      if (session.status === "ACTIVE" && session.expectedEnd < graceThreshold) {
+        addIssue("ACTIVE_SESSION_PAST_EXPECTED_END", "Session is past expectedEnd but still ACTIVE — cron may not have run");
+      }
+
+      // Check 2: per-payment integrity
+      for (const p of session.payments) {
+        if (p.amount > 0 && !p.stripeChargeId && !p.stripePaymentIntentId) {
+          addIssue("DB_PAYMENT_WITHOUT_STRIPE_CHARGE", "No Stripe charge recorded — webhook may have been missed");
+        } else if (p.stripeChargeId && !p.qbSalesReceiptId) {
+          addIssue("QB_RECEIPT_MISSING", "QB Sales Receipt missing");
+        }
+
+        // Amount-mismatch checks (only when we have live Stripe data)
+        if (p.stripeChargeId && chargeAmountMap.has(p.stripeChargeId)) {
+          const stripeAmt = chargeAmountMap.get(p.stripeChargeId)!;
+
+          // Check 2a: DB payment amount vs Stripe charge amount
+          if (Math.abs(p.amount - stripeAmt) > 0.01) {
+            addIssue(
+              "DB_STRIPE_AMOUNT_MISMATCH",
+              `DB amount (${fmt(p.amount)}) differs from Stripe charge (${fmt(stripeAmt)}) — possible webhook bug`,
+            );
+          }
+
+          // Check 2b: QB Sales Receipt amount vs Stripe charge amount
+          if (p.qbSalesReceiptAmount != null && Math.abs(p.qbSalesReceiptAmount - stripeAmt) > 0.01) {
+            addIssue(
+              "QB_RECEIPT_AMOUNT_MISMATCH",
+              `QB Sales Receipt amount (${fmt(p.qbSalesReceiptAmount)}) differs from Stripe charge (${fmt(stripeAmt)})`,
+            );
+          }
+        }
+
+        for (const r of p.refunds) {
+          if (!r.qbRefundReceiptId) {
+            addIssue("QB_REFUND_RECEIPT_MISSING", "QB Refund Receipt missing");
+          }
+
+          // Check 2c: QB Refund Receipt amount vs Stripe refund amount
+          if (r.stripeRefundId && refundAmountMap.has(r.stripeRefundId) && r.qbRefundReceiptAmount != null) {
+            const stripeRefundAmt = refundAmountMap.get(r.stripeRefundId)!;
+            if (Math.abs(r.qbRefundReceiptAmount - stripeRefundAmt) > 0.01) {
+              addIssue(
+                "QB_REFUND_AMOUNT_MISMATCH",
+                `QB Refund Receipt amount (${fmt(r.qbRefundReceiptAmount)}) differs from Stripe refund (${fmt(stripeRefundAmt)})`,
+              );
+            }
+          }
+        }
+
+        if ((p.status === "REFUNDED" || p.status === "PARTIALLY_REFUNDED") && p.refunds.length === 0) {
+          addIssue("REFUND_DETAIL_MISSING", "Refund recorded on payment but no refund detail row — charge.refunded webhook may have been missed");
+        }
+      }
+
+      // Check 3: monthly — Stripe invoice count vs DB payment count
+      if (isMonthly) {
+        const monthlyPayments = session.payments.filter(
+          (p) => p.type === "MONTHLY_CHECKIN" || p.type === "MONTHLY_RENEWAL",
+        );
+        dbPaymentCount = monthlyPayments.length;
+
+        if (invoiceCountMap.has(session.id)) {
+          stripeInvoiceCount = invoiceCountMap.get(session.id);
+          if (stripeInvoiceCount !== undefined && stripeInvoiceCount > dbPaymentCount) {
+            const diff = stripeInvoiceCount - dbPaymentCount;
+            addIssue(
+              "STRIPE_INVOICE_WITHOUT_DB_PAYMENT",
+              `${diff} Stripe invoice${diff > 1 ? "s" : ""} ha${diff > 1 ? "ve" : "s"} no matching payment row`,
+            );
+          }
         }
       }
     }
+
+    const health = issueCodes.reduce<ReconcileHealth>(
+      (acc, code) => worstHealth(acc, RECONCILE_ISSUE_DEFINITIONS[code].severity),
+      "ok",
+    );
 
     // Apply filter
     if (healthFilter === "warning" && health === "ok") continue;
@@ -267,6 +303,7 @@ export const GET = handler({}, async ({ req }) => {
     const row: ReconcileSessionRow = {
       id: session.id,
       health,
+      issueCodes: Array.from(new Set(issueCodes)),
       issues: Array.from(new Set(issues)), // deduplicate
       sessionType: isMonthly ? "MONTHLY" : "DAILY",
       driver: session.driver,
@@ -276,6 +313,7 @@ export const GET = handler({}, async ({ req }) => {
       spot: session.spot ? { label: session.spot.label } : null,
       status: session.status,
       startedAt: session.startedAt.toISOString(),
+      billingStatus: session.billingStatus,
       payments: session.payments.map((p) => ({
         id: p.id,
         type: p.type,

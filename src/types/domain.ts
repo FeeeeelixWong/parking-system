@@ -291,3 +291,8 @@ export type {
   AdminMutationResult,
 } from "./actions";
 export { DenialCode } from "./actions";
+
+// ---------------------------------------------------------------------------
+// Reconcile / Needs Review types (re-exported for single-import convenience)
+// ---------------------------------------------------------------------------
+export type { NeedsReviewSeverity, NeedsReviewCode, NeedsReviewItem, NeedsReviewResponse } from "./reconcile";

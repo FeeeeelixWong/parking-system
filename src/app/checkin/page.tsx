@@ -849,7 +849,6 @@ function CheckInContent() {
                       borderColor: newVehicleType === "TRUCK_TRAILER" ? "var(--accent)" : "var(--border)",
                     }}
                   >
-                    <div className="text-3xl mb-1">🚛</div>
                     <div className="text-[14px] font-bold tracking-wide uppercase" style={{ fontFamily: "var(--font-display)" }}>
                       Truck & Trailer
                     </div>
@@ -866,7 +865,6 @@ function CheckInContent() {
                       borderColor: newVehicleType === "BOBTAIL" ? "var(--accent)" : "var(--border)",
                     }}
                   >
-                    <div className="text-3xl mb-1">🚚</div>
                     <div className="text-[14px] font-bold tracking-wide uppercase" style={{ fontFamily: "var(--font-display)" }}>
                       Bobtail
                     </div>
