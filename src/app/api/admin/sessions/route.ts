@@ -25,6 +25,13 @@ const SessionEditBody = z.object({
   // For adjust: new effective end time (ISO string) and refund amount in dollars
   effectiveEnd: z.string().optional(),
   refundAmount: z.number().min(0).max(100_000).optional(),
+  cancellationDisposition: z.enum([
+    "N_A",
+    "REFUND_FULL",
+    "REFUND_PARTIAL_UNUSED",
+    "REFUND_PARTIAL_CUSTOM",
+    "RETAINED_INTENTIONAL",
+  ]).optional(),
   // For cancel-subscription (legacy): immediately=true cancels now, false=cancel at period end
   // TODO: deprecate once monthly UI fully migrated to cancel-monthly-session.
   cancelImmediately: z.boolean().optional(),
@@ -47,6 +54,19 @@ export const PUT = handler({ body: SessionEditBody }, async ({ body }) => {
   });
 
   if (!session) throw notFound("Session not found");
+
+  const resolveCancellationDisposition = (
+    refundMode: "none" | "unused_time" | "full" | "custom",
+    refundAmount: number,
+    refundableAmount: number,
+  ) => {
+    if (refundAmount > 0.005) {
+      if (refundMode === "full" || refundAmount >= refundableAmount - 0.005) return "REFUND_FULL" as const;
+      if (refundMode === "unused_time") return "REFUND_PARTIAL_UNUSED" as const;
+      return "REFUND_PARTIAL_CUSTOM" as const;
+    }
+    return refundableAmount > 0.005 ? "RETAINED_INTENTIONAL" as const : "N_A" as const;
+  };
 
   if (action === "extend") {
     if (!days) {
@@ -122,7 +142,11 @@ export const PUT = handler({ body: SessionEditBody }, async ({ body }) => {
     // The admin should issue refunds via the Manage Session modal before cancelling.
     await prisma.session.update({
       where: { id: sessionId },
-      data: { status: "CANCELLED", endedAt: new Date() },
+      data: {
+        status: "CANCELLED",
+        endedAt: new Date(),
+        cancellationDisposition: body.cancellationDisposition ?? "N_A",
+      },
     });
 
     await audit({
@@ -466,6 +490,12 @@ export const PUT = handler({ body: SessionEditBody }, async ({ body }) => {
       );
     }
 
+    const cancellationDisposition = resolveCancellationDisposition(
+      refundReq.mode,
+      resolvedRefund,
+      currentPeriodRefundable,
+    );
+
     // ── Step 1: refund (if any) ──────────────────────────────────────────────
     const refundsIssued: string[] = [];
     if (resolvedRefund > 0.005) {
@@ -562,13 +592,18 @@ export const PUT = handler({ body: SessionEditBody }, async ({ body }) => {
       if (mode === "now") {
         await prisma.session.update({
           where: { id: sessionId },
-          data: { status: "CANCELLED", endedAt: now, billingStatus: "CURRENT" },
+          data: {
+            status: "CANCELLED",
+            endedAt: now,
+            billingStatus: "CURRENT",
+            cancellationDisposition,
+          },
         });
       } else if (mode === "custom") {
         // custom future date — keep ACTIVE, shorten expectedEnd, cron flips later
         await prisma.session.update({
           where: { id: sessionId },
-          data: { expectedEnd: customDate!, billingStatus: "CURRENT" },
+          data: { expectedEnd: customDate!, billingStatus: "CURRENT", cancellationDisposition },
         });
       }
       // period_end: no session row change; webhook will complete it on next period boundary
@@ -620,17 +655,12 @@ export const PUT = handler({ body: SessionEditBody }, async ({ body }) => {
       });
     }
 
-    // TODO (reconcile): persist disposition on Session so reconcile can filter
-    // intentional retentions out of CANCELLED_SESSION_WITH_UNRECONCILED_CHARGE
-    // without parsing audit text. Suggested:
-    //   Session.cancellationDisposition: enum
-    //     REFUND_FULL | REFUND_PARTIAL_UNUSED | REFUND_PARTIAL_CUSTOM
-    //     | RETAINED_INTENTIONAL | N_A
     return json({
       success: true,
       subscriptionId,
       access: mode,
       refund: { amount: resolvedRefund, breakdown: refundsIssued },
+      cancellationDisposition,
     });
   }
 

@@ -98,6 +98,25 @@ function totalPaidGross(payments: SessionRow["payments"]): number {
 // computeRefundAmount(); this component only renders.
 
 type RefundOption = "none" | "unused_time" | "full" | "custom";
+type CancellationDisposition =
+  | "N_A"
+  | "REFUND_FULL"
+  | "REFUND_PARTIAL_UNUSED"
+  | "REFUND_PARTIAL_CUSTOM"
+  | "RETAINED_INTENTIONAL";
+
+function cancellationDispositionFor(
+  refundOpt: RefundOption,
+  refundAmount: number,
+  refundableAmount: number,
+): CancellationDisposition {
+  if (refundAmount > 0.005) {
+    if (refundOpt === "full" || refundAmount >= refundableAmount - 0.005) return "REFUND_FULL";
+    if (refundOpt === "unused_time") return "REFUND_PARTIAL_UNUSED";
+    return "REFUND_PARTIAL_CUSTOM";
+  }
+  return refundableAmount > 0.005 ? "RETAINED_INTENTIONAL" : "N_A";
+}
 
 function computeRefundAmount(
   selected: RefundOption,
@@ -651,7 +670,12 @@ function HourlyCancelView({
   actionState,
 }: {
   session: SessionRow;
-  onCancel: (refundAmount: number, reason: string) => void;
+  onCancel: (
+    refundAmount: number,
+    reason: string,
+    refundMode: RefundOption,
+    refundableAmount: number,
+  ) => void;
   onBack: () => void;
   actionState: "idle" | "pending" | "success" | "error";
 }) {
@@ -780,7 +804,7 @@ function HourlyCancelView({
           Keep Session
         </button>
         <button
-          onClick={() => canSubmit && onCancel(refund, reason.trim())}
+          onClick={() => canSubmit && onCancel(refund, reason.trim(), refundOpt, refundable)}
           disabled={!canSubmit}
           style={{
             flex: 1, padding: "12px 0", borderRadius: 8, border: "none",
@@ -1270,11 +1294,15 @@ export default function ManageSessionModal({ session, settings, onClose, onSucce
     }
   }
 
-  async function callCancel(refundAmount: number, reason: string) {
-    // TODO: a future single-command "cancel-with-refund-disposition" endpoint
-    // would let reconcile distinguish "kept payment intentionally" from
-    // "missed refund". Today we issue the refund first (so a Stripe failure
-    // leaves the session untouched), then mark CANCELLED.
+  async function callCancel(
+    refundAmount: number,
+    reason: string,
+    refundMode: RefundOption,
+    refundableAmount: number,
+  ) {
+    // Daily cancellation still uses refund-first sequencing so a Stripe failure
+    // leaves the session untouched. The final cancel call persists the selected
+    // refund/retention disposition for reconcile.
     setActionState("pending");
     setActionError(null);
     try {
@@ -1292,7 +1320,12 @@ export default function ManageSessionModal({ session, settings, onClose, onSucce
       const res = await fetch("/api/admin/sessions", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId: session.id, action: "cancel", reason: reason || "Admin cancelled" }),
+        body: JSON.stringify({
+          sessionId: session.id,
+          action: "cancel",
+          reason: reason || "Admin cancelled",
+          cancellationDisposition: cancellationDispositionFor(refundMode, refundAmount, refundableAmount),
+        }),
       });
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));

@@ -190,12 +190,13 @@ export const GET = handler({}, async ({ req }) => {
     };
 
     if (session.status === "CANCELLED") {
-      // CANCELLED sessions: only flag if money was taken but no refund exists
-      for (const p of session.payments) {
-        if (p.amount > 0 && p.stripeChargeId && p.status !== "REFUNDED" && p.refunds.length === 0) {
-          // TODO: once Session.cancellationDisposition is added, suppress this when
-          //       disposition is a terminal value (e.g. "retained", "refunded_externally").
-          addIssue("CANCELLED_SESSION_WITH_UNRECONCILED_CHARGE", "Cancelled paid session needs refund/retention disposition");
+      // CANCELLED sessions: only flag retained money when the admin has not
+      // recorded whether it was refunded, partially refunded, or intentionally kept.
+      if (session.cancellationDisposition === "N_A") {
+        for (const p of session.payments) {
+          if (p.amount > 0 && p.stripeChargeId && p.status !== "REFUNDED" && p.refunds.length === 0) {
+            addIssue("CANCELLED_SESSION_WITH_UNRECONCILED_CHARGE", "Cancelled paid session needs refund/retention disposition");
+          }
         }
       }
     } else {

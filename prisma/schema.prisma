@@ -25,6 +25,14 @@ enum BillingStatus {
   DELINQUENT       // all Stripe retries exhausted; subscription canceled
 }
 
+enum CancellationDisposition {
+  N_A
+  REFUND_FULL
+  REFUND_PARTIAL_UNUSED
+  REFUND_PARTIAL_CUSTOM
+  RETAINED_INTENTIONAL
+}
+
 enum PaymentType {
   CHECKIN
   MONTHLY_CHECKIN
@@ -151,6 +159,7 @@ model Session {
   endedAt            DateTime?
   status             SessionStatus @default(ACTIVE)
   billingStatus      BillingStatus @default(CURRENT)
+  cancellationDisposition CancellationDisposition @default(N_A)
   reminderSent       Boolean       @default(false)
   overstayAlertSent  Boolean       @default(false)
   // Terms acceptance (clickwrap consent record). "legacy" = pre-consent-tracking row.

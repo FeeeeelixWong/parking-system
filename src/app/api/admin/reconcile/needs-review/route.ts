@@ -137,7 +137,7 @@ export const GET = handler({}, async ({ req }) => {
   const allItems: NeedsReviewItem[] = [];
 
   for (const session of sessions) {
-    const { id: sessionId, driver, status, billingStatus, startedAt, expectedEnd } = session;
+    const { id: sessionId, driver, status, billingStatus, startedAt, expectedEnd, cancellationDisposition } = session;
     const driverName = driver.name;
 
     // Convenience: build a related object with session + driver pre-filled
@@ -153,11 +153,9 @@ export const GET = handler({}, async ({ req }) => {
 
     // ── CANCELLED sessions: only one check ─────────────────────────────────
     if (status === "CANCELLED") {
+      if (cancellationDisposition !== "N_A") continue;
       for (const p of session.payments) {
         if (p.amount > 0 && p.stripeChargeId && p.status !== "REFUNDED" && p.refunds.length === 0) {
-          // TODO: once Session.cancellationDisposition is added, suppress this warning
-          //       when the disposition is set to a terminal value (e.g. "retained",
-          //       "refunded_externally") indicating the admin has already handled it.
           allItems.push(makeItem(
             "CANCELLED_SESSION_WITH_UNRECONCILED_CHARGE",
             "Cancelled paid session needs refund/retention disposition",
