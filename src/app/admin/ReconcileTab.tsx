@@ -81,7 +81,7 @@ function StatusBadge({ health }: { health: "ok" | "warning" | "critical" }) {
 
 type WriteState = "idle" | "pending" | "success" | "error";
 
-// Inline action pill — three states: idle → pending (⏳) → success (✅) or error (🔴 Retry)
+// Inline action pill — three states: idle → pending → success or error
 function ActionBtn({
   label,
   state,
@@ -91,11 +91,11 @@ function ActionBtn({
   state: WriteState;
   onTrigger: () => void;
 }) {
-  if (state === "success") return <span style={{ fontSize: 13 }}>✅</span>;
+  if (state === "success") return <span style={{ fontSize: 11, fontWeight: 600, color: "#15803D" }}>Done</span>;
   if (state === "pending") {
     return (
       <button disabled style={{ padding: "2px 9px", borderRadius: 4, border: `1px solid #C7C7CC`, background: "#F2F2F7", color: "#8E8E93", fontSize: 11, fontWeight: 600, cursor: "not-allowed", whiteSpace: "nowrap" }}>
-        ⏳ Writing…
+        Writing…
       </button>
     );
   }
@@ -111,7 +111,7 @@ function ActionBtn({
         fontSize: 11, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap",
       }}
     >
-      {isErr ? "🔴 Retry" : label}
+      {isErr ? "Retry" : label}
     </button>
   );
 }
@@ -442,6 +442,7 @@ function MainStripeCell({ s, testMode }: { s: ReconcileSessionRow; testMode: boo
         Authorized ↗
       </a>
     );
+  if (!s.payments.some((p) => p.amount > 0)) return null;
   return <span style={{ fontSize: 12, color: ERR }}>No charge recorded</span>;
 }
 
@@ -668,6 +669,15 @@ export default function ReconcileTab({ mobile, onHasIssues }: { mobile: boolean;
                           <span style={{ color: FG_DIM, fontSize: 12 }}>{isExpanded ? "▲" : "▼"}</span>
                         </div>
                       </div>
+                      {s.billingStatus !== "CURRENT" && (
+                        <span style={{
+                          display: "inline-block", marginTop: 5, fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
+                          background: s.billingStatus === "DELINQUENT" ? ERR_LIGHT : WARN_LIGHT,
+                          color: s.billingStatus === "DELINQUENT" ? ERR : WARN,
+                        }}>
+                          {s.billingStatus === "DELINQUENT" ? "DELINQUENT" : "PAYMENT FAILED"}
+                        </span>
+                      )}
                       {s.issues[0] && (
                         <div style={{ fontSize: 12, color: WARN, marginTop: 6 }}>{s.issues[0]}</div>
                       )}
@@ -731,6 +741,15 @@ export default function ReconcileTab({ mobile, onHasIssues }: { mobile: boolean;
                         }}>
                           {s.status}
                         </span>
+                        {s.billingStatus !== "CURRENT" && (
+                          <span style={{
+                            display: "block", marginTop: 3, fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 3,
+                            background: s.billingStatus === "DELINQUENT" ? ERR_LIGHT : WARN_LIGHT,
+                            color: s.billingStatus === "DELINQUENT" ? ERR : WARN,
+                          }}>
+                            {s.billingStatus === "DELINQUENT" ? "DELINQUENT" : "PAYMENT FAILED"}
+                          </span>
+                        )}
                       </td>
                       <td style={tdStyle}>
                         <MainStripeCell s={s} testMode={testMode} />

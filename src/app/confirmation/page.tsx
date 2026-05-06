@@ -229,7 +229,6 @@ function ConfirmationContent() {
               fontWeight: 700,
             }}
           >
-            ✓
           </div>
           <p
             style={{
@@ -301,7 +300,6 @@ function ConfirmationContent() {
               {session.spot.label}
             </p>
           </div>
-          <div style={{ fontSize: 44, opacity: 0.75, userSelect: "none" }}>🅿️</div>
         </div>
 
         {/* Session detail rows */}

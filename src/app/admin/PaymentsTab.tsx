@@ -217,7 +217,7 @@ function TransactionDetailsPopup({ payment, siblingPayments, onClose, stripeTest
                     <span style={{ fontSize: 10, color: "#9CA3AF", fontFamily: "monospace" }}>#{qbSalesReceiptId}</span>
                   </div>
                 ) : paymentMissingQb ? (
-                  <span style={{ fontSize: 11, color: "#DC2626", fontWeight: 500 }}>⚠ No receipt</span>
+                  <span style={{ fontSize: 11, color: "#DC2626", fontWeight: 500 }}>No receipt</span>
                 ) : (
                   <span style={{ fontSize: 11, color: "#9CA3AF" }}>—</span>
                 )}
@@ -272,7 +272,7 @@ function TransactionDetailsPopup({ payment, siblingPayments, onClose, stripeTest
                         <span style={{ fontSize: 10, color: "#9CA3AF", fontFamily: "monospace" }}>#{qbRefundReceiptId}</span>
                       </div>
                     ) : (
-                      <span style={{ fontSize: 11, color: "#DC2626", fontWeight: 500 }}>⚠ No receipt</span>
+                      <span style={{ fontSize: 11, color: "#DC2626", fontWeight: 500 }}>No receipt</span>
                     )}
                   </td>
                 </tr>
@@ -453,7 +453,7 @@ export default function PaymentsTab({ mobile, initialSearch = "" }: { mobile: bo
       {!pendingLoading && pendingItems.length > 0 && (
         <div style={{ marginBottom: 24 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-            <span style={{ fontSize: 13, fontWeight: 600, color: "#F59E0B" }}>⚠️ Pending Payments</span>
+            <span style={{ fontSize: 13, fontWeight: 600, color: "#F59E0B" }}>Pending Payments</span>
             <span style={{ fontSize: 11, color: FG_DIM, background: "#1C1C1E", border: "1px solid #333", borderRadius: 10, padding: "1px 7px" }}>{pendingItems.length}</span>
           </div>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
@@ -472,7 +472,7 @@ export default function PaymentsTab({ mobile, initialSearch = "" }: { mobile: bo
                 const isExpanded = expandedPending.has(item.sessionId);
                 const isPastDue = item.billingStatus === "PAYMENT_FAILED";
                 const statusColor = isPastDue ? "#F59E0B" : "#DC2626";
-                const statusLabel = isPastDue ? "⚠️ Past Due" : "🔴 Delinquent";
+                const statusLabel = isPastDue ? "Past Due" : "Delinquent";
                 const stripeBase = stripeTestMode
                   ? "https://dashboard.stripe.com/test"
                   : "https://dashboard.stripe.com";
@@ -717,7 +717,6 @@ export default function PaymentsTab({ mobile, initialSearch = "" }: { mobile: bo
       {/* Divergence warning bar */}
       {divergentCount > 0 && (
         <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", background: "#2C1810", border: "1px solid #DC2626", borderRadius: 8, marginBottom: 16, fontSize: 13, color: "#FCA5A5" }}>
-          <span style={{ fontSize: 16 }}>⚠</span>
           <span>
             <strong>{divergentCount} QB accounting {divergentCount === 1 ? "gap" : "gaps"} detected</strong>
             {" "}— {divergentCount === 1 ? "a payment or refund is" : "some payments or refunds are"} missing a matching QB receipt.

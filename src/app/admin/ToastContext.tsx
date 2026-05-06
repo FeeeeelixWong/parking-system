@@ -32,8 +32,6 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
   const bg = isOk ? "#DCFCE7" : "#FEF2F2";
   const border = isOk ? "#86EFAC" : "#FCA5A5";
   const fg = isOk ? "#166534" : "#991B1B";
-  const icon = isOk ? "✅" : "🔴";
-
   return (
     <div style={{
       display: "flex", alignItems: "flex-start", gap: 10,
@@ -44,7 +42,6 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
       fontFamily: "var(--font-body)",
       animation: "toast-in 0.18s ease",
     }}>
-      <span style={{ fontSize: 14, lineHeight: "20px", flexShrink: 0 }}>{icon}</span>
       <div style={{ flex: 1, fontSize: 13, color: fg, lineHeight: 1.5 }}>
         {toast.message}
         {toast.actionLabel && toast.onAction && (

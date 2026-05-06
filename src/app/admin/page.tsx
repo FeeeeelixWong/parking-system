@@ -180,7 +180,7 @@ export default function AdminDashboard() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const t = params.get("tab");
-    const validTabs = ["overview", "sessions", "payments", "drivers", "log", "settings"] as const;
+    const validTabs = ["overview", "sessions", "payments", "reconcile", "drivers", "log", "settings"] as const;
     if (t && (validTabs as readonly string[]).includes(t)) {
       setTab(t as typeof tab);
     }
@@ -190,7 +190,7 @@ export default function AdminDashboard() {
   }, []);
 
   useEffect(() => {
-    fetch("/api/admin/reconcile?health=warning&limit=1")
+    fetch("/api/admin/reconcile/needs-review?limit=1")
       .then((r) => r.json())
       .then((d) => setReconcileHasIssues((d.total ?? 0) > 0))
       .catch(() => {});
