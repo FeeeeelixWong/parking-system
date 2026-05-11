@@ -20,6 +20,19 @@ const SANDBOX_BASE = "https://sandbox-quickbooks.api.intuit.com";
 const PROD_BASE = "https://quickbooks.api.intuit.com";
 
 /**
+ * Strip characters QB rejects before writing to QB fields.
+ * QB accepts printable ASCII [\x20-\x7E]. Non-ASCII → space, then collapse
+ * consecutive spaces and trim to maxLen.
+ */
+function sanitizeForQb(str: string, maxLen: number): string {
+  return str
+    .replace(/[^\x20-\x7E]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLen);
+}
+
+/**
  * Thrown when QB is unreachable or tokens can't be acquired/refreshed.
  * Callers should catch this and audit SALES_RECEIPT_FAILED so the admin
  * knows to reconcile manually.
@@ -31,7 +44,9 @@ export class QBAuthError extends Error {
   }
 }
 
-const isProd = process.env.NODE_ENV === "production";
+// Force sandbox when running under Playwright (next start sets NODE_ENV=production,
+// but E2E tests should always use the QB sandbox, never the production API).
+const isProd = process.env.NODE_ENV === "production" && !process.env.PLAYWRIGHT_TEST;
 const API_BASE = isProd ? PROD_BASE : SANDBOX_BASE;
 
 /**
@@ -176,9 +191,13 @@ export async function findOrCreateCustomer(opts: {
   email?: string;
 }): Promise<QBCustomer> {
   const digits = opts.phone.replace(/\D/g, "");
-  const displayName = `${opts.name} (${digits})`;
+  // Sanitize name separately so we can fall back if non-ASCII chars consume it entirely.
+  const sanitizedName = sanitizeForQb(opts.name, 85) || "Driver";
+  const displayName = `${sanitizedName} (${digits})`;
+  // QB QQL uses SQL-style single-quote escaping (double the quote, not backslash).
+  const escapedForQql = displayName.replace(/'/g, "''");
   const searchRes = await qbFetch<{ QueryResponse: { Customer?: QBCustomer[] } }>(
-    `/query?query=${encodeURIComponent(`SELECT * FROM Customer WHERE DisplayName = '${displayName}' MAXRESULTS 1`)}`,
+    `/query?query=${encodeURIComponent(`SELECT * FROM Customer WHERE DisplayName = '${escapedForQql}' MAXRESULTS 1`)}`,
   );
 
   if (searchRes.QueryResponse.Customer?.length) {
@@ -338,7 +357,7 @@ export async function writeSalesReceipt(args: {
           {
             Amount: args.amount,
             DetailType: "SalesItemLineDetail",
-            Description: args.description,
+            Description: sanitizeForQb(args.description, 4000),
             SalesItemLineDetail: {
               ItemRef: { value: itemId },
               UnitPrice: args.amount,
@@ -397,9 +416,12 @@ export async function writeRefundReceipt(args: {
           {
             Amount: args.amount,
             DetailType: "SalesItemLineDetail",
-            Description: args.linkedSalesReceiptId
-              ? `${args.description} (Sales Receipt #${args.linkedSalesReceiptId})`
-              : args.description,
+            Description: sanitizeForQb(
+              args.linkedSalesReceiptId
+                ? `${args.description} (Sales Receipt #${args.linkedSalesReceiptId})`
+                : args.description,
+              4000,
+            ),
             SalesItemLineDetail: {
               ItemRef: { value: itemId },
               UnitPrice: args.amount,

@@ -4,8 +4,9 @@ import {
   disconnectDb,
   resetDb,
   seedActiveDriverSession,
-} from "../support/db";
-import { setSavedDriverAndDevice } from "../support/driver-ui";
+} from "../../support/db";
+import { setSavedDriverAndDevice } from "../../support/driver-ui";
+import { createTestRun } from "../../support/test-run";
 
 test.skip(!process.env.TEST_DATABASE_URL, "Set TEST_DATABASE_URL to run DB-backed driver e2e tests.");
 
@@ -17,8 +18,9 @@ test.beforeEach(async () => {
   await resetDb();
 });
 
-test("fresh entry scan for saved active driver opens the gate once", async ({ page }) => {
-  const { driver, session } = await seedActiveDriverSession();
+test("fresh entry scan for saved active driver opens the gate once", async ({ page }, testInfo) => {
+  const testRun = createTestRun(testInfo);
+  const { driver, session } = await seedActiveDriverSession({ testRun });
   await setSavedDriverAndDevice(page, driver, "device-a");
 
   const before = await countAudit("GATE_OPEN", session.id);
@@ -28,8 +30,9 @@ test("fresh entry scan for saved active driver opens the gate once", async ({ pa
   await expect.poll(() => countAudit("GATE_DENIED", session.id)).toBe(0);
 });
 
-test("refresh after a fresh entry scan does not open the gate again", async ({ page }) => {
-  const { driver, session } = await seedActiveDriverSession();
+test("refresh after a fresh entry scan does not open the gate again", async ({ page }, testInfo) => {
+  const testRun = createTestRun(testInfo);
+  const { driver, session } = await seedActiveDriverSession({ testRun });
   await setSavedDriverAndDevice(page, driver, "device-a");
 
   await page.goto("/entry");
@@ -41,8 +44,9 @@ test("refresh after a fresh entry scan does not open the gate again", async ({ p
   await expect.poll(() => countAudit("GATE_OPEN", session.id)).toBe(1);
 });
 
-test("second device using same saved session is marked suspicious and does not open gate", async ({ browser }) => {
-  const { driver, session } = await seedActiveDriverSession();
+test("second device using same saved session is marked suspicious and does not open gate", async ({ browser }, testInfo) => {
+  const testRun = createTestRun(testInfo);
+  const { driver, session } = await seedActiveDriverSession({ testRun });
 
   const first = await browser.newPage();
   await setSavedDriverAndDevice(first, driver, "device-a");
@@ -59,10 +63,11 @@ test("second device using same saved session is marked suspicious and does not o
   await second.close();
 });
 
-test("xfail: stolen saved driver identity on a new device should require PIN before opening gate", async ({ page }) => {
+test("xfail: stolen saved driver identity on a new device should require PIN before opening gate", async ({ page }, testInfo) => {
   test.fail(true, "Current contract trusts a valid saved driver object on a new device. Future fix: require PIN/new-device verification before gate access.");
 
-  const { driver, session } = await seedActiveDriverSession();
+  const testRun = createTestRun(testInfo);
+  const { driver, session } = await seedActiveDriverSession({ testRun, deviceLabel: "original-device" });
   await setSavedDriverAndDevice(page, driver, "unknown-new-device");
 
   await page.goto("/entry");
