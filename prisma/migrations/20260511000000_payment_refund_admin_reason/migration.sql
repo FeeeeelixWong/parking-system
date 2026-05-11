@@ -1,0 +1,1 @@
+ALTER TABLE "PaymentRefund" ADD COLUMN IF NOT EXISTS "adminReason" TEXT;
