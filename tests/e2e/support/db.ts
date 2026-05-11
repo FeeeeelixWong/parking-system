@@ -935,6 +935,29 @@ export async function findPaymentByStripePaymentIntentId(paymentIntentId: string
  * Find a PaymentRefund row by its Stripe refund ID.
  * Returns null if not found.
  */
+/**
+ * Return all Payment rows for a subscription, ordered by creation time.
+ * Used to assert hostedInvoiceUrl and type after invoice webhook events.
+ */
+export async function findPaymentsByStripeSubscriptionId(stripeSubscriptionId: string) {
+  const result = await db().query<{
+    id: string;
+    sessionId: string;
+    type: string;
+    amount: number;
+    status: string;
+    stripeInvoiceId: string | null;
+    hostedInvoiceUrl: string | null;
+  }>(
+    `SELECT id, "sessionId", type, amount, status, "stripeInvoiceId", "hostedInvoiceUrl"
+     FROM "Payment"
+     WHERE "stripeSubscriptionId" = $1
+     ORDER BY "createdAt" ASC`,
+    [stripeSubscriptionId],
+  );
+  return result.rows;
+}
+
 export async function findPaymentRefundByStripeRefundId(stripeRefundId: string) {
   const result = await db().query<{
     id: string;

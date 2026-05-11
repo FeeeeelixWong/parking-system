@@ -21,6 +21,7 @@ function makeItem(
   actionLabel: string | undefined,
   related: NeedsReviewItem["related"],
   occurredAt?: string,
+  actionHref?: string,
 ): NeedsReviewItem {
   // Build a stable, deterministic ID from code + related IDs
   const parts = [code, related.sessionId ?? "", related.paymentId ?? "", related.refundId ?? ""];
@@ -32,6 +33,7 @@ function makeItem(
     detail,
     recommendedAction,
     actionLabel,
+    actionHref,
     related,
     occurredAt,
   };
@@ -64,6 +66,7 @@ export const GET = handler({}, async ({ req }) => {
           stripeChargeId: true,
           stripePaymentIntentId: true,
           stripeSubscriptionId: true,
+          hostedInvoiceUrl: true,
           qbSalesReceiptId: true,
           qbSalesReceiptAmount: true,
           refunds: {
@@ -221,14 +224,16 @@ export const GET = handler({}, async ({ req }) => {
           failedDetail += " Access blocks only when Stripe cancels the subscription.";
         }
       }
+      const invoiceUrl = session.payments.find((p) => p.hostedInvoiceUrl)?.hostedInvoiceUrl ?? undefined;
       allItems.push(makeItem(
         "SUBSCRIPTION_PAYMENT_FAILED",
         "Subscription payment failed",
         failedDetail,
         "Contact the driver to update their payment method before Stripe exhausts retries.",
-        "Review subscription",
+        invoiceUrl ? "Open invoice" : "Review subscription",
         rel(),
         startedAt.toISOString(),
+        invoiceUrl,
       ));
     }
 
