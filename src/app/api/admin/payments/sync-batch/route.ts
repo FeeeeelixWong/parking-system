@@ -30,6 +30,8 @@ export const POST = handler({ body: Body }, async ({ body }) => {
   });
 
   let synced = 0;
+  const failed: string[] = [];
+
   await Promise.allSettled(payments.map(async (p) => {
     try {
       let chargeId = p.stripeChargeId;
@@ -55,9 +57,9 @@ export const POST = handler({ body: Body }, async ({ body }) => {
       await processChargeRefund(charge, `batch_sync_${p.id}`);
       synced++;
     } catch {
-      // Per-payment failures are silent — one bad PI doesn't block the rest.
+      failed.push(p.id);
     }
   }));
 
-  return json({ synced });
+  return json({ synced, failed });
 });
