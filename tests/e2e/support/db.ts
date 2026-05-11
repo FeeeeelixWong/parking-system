@@ -1112,6 +1112,17 @@ export async function setBillingPaymentFailedWithNullTimestamp(sessionId: string
   );
 }
 
+export async function setSessionBillingPaymentFailed(sessionId: string) {
+  await db().query(
+    `UPDATE "Session" SET "billingStatus" = 'PAYMENT_FAILED', "billingFailedAt" = NOW() WHERE id = $1`,
+    [sessionId],
+  );
+}
+
+export async function setPaymentHostedInvoiceUrl(paymentId: string, url: string) {
+  await db().query(`UPDATE "Payment" SET "hostedInvoiceUrl" = $1 WHERE id = $2`, [url, paymentId]);
+}
+
 /**
  * Reads the most recent SUBSCRIPTION_CANCELED audit row for a session.
  * Used for DELINQ-019: verify the [SUB_DEL:UNKNOWN] prefix is present on
