@@ -194,6 +194,9 @@ export type AppSettings = {
   lastStripeReconcileAt: string | null;
   /** Stripe charge IDs that failed the last reconcile diff. */
   stripeReconcileFlaggedIds: string[];
+  // ─── Subscription delinquency policy ─────────────────────────────────
+  failedPaymentPolicy: "on_subscription_deleted" | "immediate_on_payment_failed" | "after_grace_days";
+  failedPaymentGraceDays: number;
 };
 
 // ---------------------------------------------------------------------------
