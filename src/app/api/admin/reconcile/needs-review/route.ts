@@ -134,6 +134,28 @@ export const GET = handler({}, async ({ req }) => {
   const settings = await getSettings();
   const graceThreshold = new Date(Date.now() - settings.gracePeriodMinutes * 60 * 1000);
 
+  // Unknown-reason subscription deletions — surfaced via the [SUB_DEL:UNKNOWN] audit
+  // prefix written by the stripe webhook handler. These are deletions Stripe fired with
+  // no payment_failed/payment_disputed/cancellation_requested/cancel_at signal AND no
+  // admin-initiated cancel flag — they must be reviewed manually because we cannot tell
+  // whether the driver should retain access or be marked DELINQUENT.
+  const unknownDeletionAudits = await prisma.auditLog.findMany({
+    where: {
+      action: "SUBSCRIPTION_CANCELED",
+      details: { startsWith: "[SUB_DEL:UNKNOWN]" },
+      sessionId: { in: sessions.map((s) => s.id) },
+    },
+    orderBy: { createdAt: "desc" },
+    select: { sessionId: true, createdAt: true },
+  });
+  // Keep newest audit per session (orderBy desc + dedupe).
+  const unknownDeletionBySessionId = new Map<string, Date>();
+  for (const a of unknownDeletionAudits) {
+    if (a.sessionId && !unknownDeletionBySessionId.has(a.sessionId)) {
+      unknownDeletionBySessionId.set(a.sessionId, a.createdAt);
+    }
+  }
+
   const allItems: NeedsReviewItem[] = [];
 
   for (const session of sessions) {
@@ -185,10 +207,24 @@ export const GET = handler({}, async ({ req }) => {
     }
 
     if (billingStatus === "PAYMENT_FAILED") {
+      const billingFailedAt = session.billingFailedAt;
+      let failedDetail = `The latest renewal for ${driverName}'s subscription failed.`;
+      if (billingFailedAt) {
+        if (settings.failedPaymentPolicy === "immediate_on_payment_failed") {
+          failedDetail += " Access is blocked immediately (immediate policy).";
+        } else if (settings.failedPaymentPolicy === "after_grace_days") {
+          const delinquentAt = new Date(
+            billingFailedAt.getTime() + settings.failedPaymentGraceDays * 86400000,
+          );
+          failedDetail += ` Access blocks ${delinquentAt.toLocaleDateString("en-US", { month: "short", day: "numeric" })} (${settings.failedPaymentGraceDays}d grace).`;
+        } else {
+          failedDetail += " Access blocks only when Stripe cancels the subscription.";
+        }
+      }
       allItems.push(makeItem(
         "SUBSCRIPTION_PAYMENT_FAILED",
         "Subscription payment failed",
-        `The latest renewal for ${driverName}'s subscription failed — Stripe is retrying.`,
+        failedDetail,
         "Contact the driver to update their payment method before Stripe exhausts retries.",
         "Review subscription",
         rel(),
@@ -205,6 +241,19 @@ export const GET = handler({}, async ({ req }) => {
         "Review subscription",
         rel(),
         startedAt.toISOString(),
+      ));
+    }
+
+    const unknownDeletedAt = unknownDeletionBySessionId.get(session.id);
+    if (unknownDeletedAt) {
+      allItems.push(makeItem(
+        "SUBSCRIPTION_DELETION_UNKNOWN",
+        "Subscription deleted — reason unknown",
+        `Stripe deleted ${driverName}'s subscription on ${fmtDate(unknownDeletedAt)} with no recognizable reason and no admin-initiated cancel. Manual review required — the driver may still have gate access depending on the session's current state.`,
+        "Inspect the subscription in Stripe and decide whether to mark the session DELINQUENT or close it cleanly.",
+        "Review subscription",
+        rel(),
+        unknownDeletedAt.toISOString(),
       ));
     }
 

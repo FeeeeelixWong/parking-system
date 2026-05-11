@@ -41,6 +41,7 @@ export type ReconcileSessionRow = {
   status: string;
   startedAt: string;
   billingStatus: string;
+  billingFailedAt: Date | null;
   payments: ReconcilePaymentRow[];
   stripeInvoiceCount?: number;
   dbPaymentCount?: number;
@@ -207,10 +208,21 @@ export const GET = handler({}, async ({ req }) => {
 
       // Check: subscription billing failure
       if (session.billingStatus === "PAYMENT_FAILED") {
-        addIssue("SUBSCRIPTION_PAYMENT_FAILED", "Subscription payment failed — renewal overdue");
+        let failedMsg = "Subscription payment failed — renewal overdue";
+        if (session.billingFailedAt) {
+          if (settings.failedPaymentPolicy === "immediate_on_payment_failed") {
+            failedMsg += " — access blocked (immediate policy)";
+          } else if (settings.failedPaymentPolicy === "after_grace_days") {
+            const delinquentAt = new Date(
+              session.billingFailedAt.getTime() + settings.failedPaymentGraceDays * 86400000,
+            );
+            failedMsg += ` — access blocks ${delinquentAt.toLocaleDateString()} (${settings.failedPaymentGraceDays}d grace)`;
+          }
+        }
+        addIssue("SUBSCRIPTION_PAYMENT_FAILED", failedMsg);
       }
       if (session.billingStatus === "DELINQUENT") {
-        addIssue("SUBSCRIPTION_DELINQUENT", "Subscription delinquent — multiple payment failures");
+        addIssue("SUBSCRIPTION_DELINQUENT", "Subscription delinquent — access blocked");
       }
 
       // Check: ACTIVE session past expectedEnd + grace window (cron may not have run)
@@ -314,6 +326,7 @@ export const GET = handler({}, async ({ req }) => {
       status: session.status,
       startedAt: session.startedAt.toISOString(),
       billingStatus: session.billingStatus,
+      billingFailedAt: session.billingFailedAt,
       payments: session.payments.map((p) => ({
         id: p.id,
         type: p.type,

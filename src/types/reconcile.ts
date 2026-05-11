@@ -12,6 +12,7 @@ export type NeedsReviewCode =
   | "STRIPE_INVOICE_WITHOUT_DB_PAYMENT"
   | "SUBSCRIPTION_PAYMENT_FAILED"
   | "SUBSCRIPTION_DELINQUENT"
+  | "SUBSCRIPTION_DELETION_UNKNOWN"
   | "ACTIVE_SESSION_PAST_EXPECTED_END"
   | "CANCELLED_SESSION_WITH_UNRECONCILED_CHARGE";
 
@@ -27,6 +28,7 @@ export const RECONCILE_ISSUE_DEFINITIONS = {
   STRIPE_INVOICE_WITHOUT_DB_PAYMENT: { severity: "warning" },
   SUBSCRIPTION_PAYMENT_FAILED: { severity: "warning" },
   SUBSCRIPTION_DELINQUENT: { severity: "critical" },
+  SUBSCRIPTION_DELETION_UNKNOWN: { severity: "critical" },
   ACTIVE_SESSION_PAST_EXPECTED_END: { severity: "warning" },
   CANCELLED_SESSION_WITH_UNRECONCILED_CHARGE: { severity: "warning" },
 } as const satisfies Record<NeedsReviewCode, { severity: NeedsReviewSeverity }>;
