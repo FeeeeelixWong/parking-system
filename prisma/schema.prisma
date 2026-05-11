@@ -231,6 +231,7 @@ model PaymentRefund {
   stripeRefundId    String   @unique
   qbRefundReceiptId    String?
   qbRefundReceiptAmount Float?  // amount written to QB; compared to Stripe refund in reconcile
+  adminReason          String?
   createdAt            DateTime @default(now())
 
   @@index([paymentId])

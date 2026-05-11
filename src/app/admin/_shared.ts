@@ -18,13 +18,18 @@ export const qbLinks = {
   dashboard:    () => `${QB_BASE}/app/homepage`,
 };
 
-const STRIPE_DASHBOARD = "https://dashboard.stripe.com";
+function stripeBase(testMode = false): string {
+  return testMode ? "https://dashboard.stripe.com/test" : "https://dashboard.stripe.com";
+}
+
 export const stripeLinks = {
-  paymentIntent: (id: string) => `${STRIPE_DASHBOARD}/payments/${id}`,
-  charge:        (id: string) => `${STRIPE_DASHBOARD}/payments/${id}`,
-  customer:      (id: string) => `${STRIPE_DASHBOARD}/customers/${id}`,
-  subscription:  (id: string) => `${STRIPE_DASHBOARD}/subscriptions/${id}`,
-  refund:        (id: string) => `${STRIPE_DASHBOARD}/refunds/${id}`,
+  paymentIntent: (id: string, testMode = false) => `${stripeBase(testMode)}/payments/${id}`,
+  charge:        (id: string, testMode = false) => `${stripeBase(testMode)}/payments/${id}`,
+  customer:      (id: string, testMode = false) => `${stripeBase(testMode)}/customers/${id}`,
+  subscription:  (id: string, testMode = false) => `${stripeBase(testMode)}/subscriptions/${id}`,
+  refund:        (id: string, testMode = false) => `${stripeBase(testMode)}/refunds/${id}`,
+  invoice:       (id: string, testMode = false) => `${stripeBase(testMode)}/invoices/${id}`,
+  dispute:       (id: string, testMode = false) => `${stripeBase(testMode)}/disputes/${id}`,
 };
 
 export type PaymentRowRefs = {
@@ -41,10 +46,9 @@ export function isRealPayment(p: PaymentRowRefs): boolean {
 }
 
 export function stripeDashboardUrl(p: PaymentRowRefs, testMode = false): string | null {
-  const base = testMode ? "https://dashboard.stripe.com/test" : "https://dashboard.stripe.com";
-  if (p.stripePaymentIntentId) return `${base}/payments/${p.stripePaymentIntentId}`;
-  if (p.stripeChargeId)        return `${base}/payments/${p.stripeChargeId}`;
-  if (p.stripeSubscriptionId)  return `${base}/subscriptions/${p.stripeSubscriptionId}`;
+  if (p.stripePaymentIntentId) return stripeLinks.paymentIntent(p.stripePaymentIntentId, testMode);
+  if (p.stripeChargeId)        return stripeLinks.charge(p.stripeChargeId, testMode);
+  if (p.stripeSubscriptionId)  return stripeLinks.subscription(p.stripeSubscriptionId, testMode);
   return null;
 }
 
