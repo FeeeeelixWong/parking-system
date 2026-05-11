@@ -169,22 +169,31 @@ async function handleInvoicePaymentSucceeded(event: Stripe.Event) {
   const stripe = getStripe();
   let chargeId: string | null = null;
   let paymentIntentId: string | null = null;
-  const invoicePayments = await stripe.invoicePayments.list({ invoice: invoice.id, limit: 1 });
-  const invoicePayment = invoicePayments.data[0];
-  if (invoicePayment) {
-    const piRef = invoicePayment.payment?.payment_intent;
-    paymentIntentId = typeof piRef === "string" ? piRef : piRef?.id ?? null;
-    if (paymentIntentId) {
-      const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
-      chargeId = typeof pi.latest_charge === "string" ? pi.latest_charge : pi.latest_charge?.id ?? null;
+  try {
+    const invoicePayments = await stripe.invoicePayments.list({ invoice: invoice.id, limit: 1 });
+    const invoicePayment = invoicePayments.data[0];
+    if (invoicePayment) {
+      const piRef = invoicePayment.payment?.payment_intent;
+      paymentIntentId = typeof piRef === "string" ? piRef : piRef?.id ?? null;
+      if (paymentIntentId) {
+        const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
+        chargeId = typeof pi.latest_charge === "string" ? pi.latest_charge : pi.latest_charge?.id ?? null;
+      }
     }
+  } catch {
+    console.warn(`[stripe-webhook] Could not resolve chargeId for invoice ${invoice.id} — QB receipt will be skipped`);
   }
 
   const amount = (invoice.amount_paid ?? 0) / 100;
 
   // Fetch subscription metadata to get the contracted total months (N).
-  const sub = await stripe.subscriptions.retrieve(subscriptionId);
-  const totalMonths = parseInt(sub.metadata?.months ?? "1", 10);
+  let totalMonths = 1;
+  try {
+    const sub = await stripe.subscriptions.retrieve(subscriptionId);
+    totalMonths = parseInt(sub.metadata?.months ?? "1", 10);
+  } catch {
+    console.warn(`[stripe-webhook] Could not retrieve subscription ${subscriptionId} metadata — using totalMonths=1`);
+  }
 
   if (invoice.billing_reason === "subscription_create") {
     // Payment + Session already created by checkout.session.completed.
@@ -313,6 +322,7 @@ async function handleInvoicePaymentFailed(event: Stripe.Event) {
 
   const firstPayment = await prisma.payment.findFirst({
     where: { stripeSubscriptionId: subscriptionId },
+    orderBy: { createdAt: "asc" },
     include: { session: true },
   });
   if (!firstPayment) return;

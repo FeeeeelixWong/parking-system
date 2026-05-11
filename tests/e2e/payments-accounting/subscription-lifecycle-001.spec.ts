@@ -467,7 +467,7 @@ test(
 
       // Needs Review: SUBSCRIPTION_PAYMENT_FAILED actionHref must equal fakeInvoiceUrl
       await authenticateAdmin(request);
-      const nrRes = await request.get(`${baseUrl}/api/admin/reconcile/needs-review`);
+      const nrRes = await request.get("/api/admin/reconcile/needs-review");
       expect(nrRes.status()).toBe(200);
       const nrBody = await nrRes.json() as { items: Array<{ code: string; actionHref?: string; related?: { sessionId?: string } }> };
       const nrItem = nrBody.items.find(
