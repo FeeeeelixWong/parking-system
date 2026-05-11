@@ -10,6 +10,7 @@ import {
   seedMonthlyActiveSession,
   findPaymentByStripePaymentIntentId,
   findSessionByStripeSubscriptionId,
+  findPaymentsByStripeSubscriptionId,
   countAudit,
   countPaymentsByTypeForSession,
 } from "../support/db";
@@ -386,6 +387,197 @@ test(
       // Needs Review: SUBSCRIPTION_DELINQUENT must appear
       await authenticateAdmin(request);
       await expectNeedsReviewCode(request, "SUBSCRIPTION_DELINQUENT", { sessionId: seededSession.id });
+    } finally {
+      await world.cleanup();
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// SUB-010: invoice.payment_failed stores hostedInvoiceUrl on anchor payment
+// ---------------------------------------------------------------------------
+test(
+  "SUB-010: invoice.payment_failed persists hosted_invoice_url on the anchor MONTHLY_CHECKIN payment",
+  async ({ request }, testInfo) => {
+    const world = createWorld(testInfo);
+    const stripe = getE2EStripe();
+    const env = getE2EEnv();
+    const baseUrl = env.baseUrl;
+
+    try {
+      await resetDb();
+
+      const subId = `sub_test_s10_${world.testRun.testRunId.replace(/-/g, "_").slice(0, 14)}`;
+      const { session: seededSession } = await seedMonthlyActiveSession({
+        testRun: world.testRun,
+        stripeSubscriptionId: subId,
+      });
+
+      const fakeInvoiceUrl = `https://invoice.stripe.com/i/test_${world.testRun.testRunId.replace(/-/g, "")}`;
+
+      const eventId = `evt_test_s10_${world.testRun.testRunId.replace(/-/g, "_")}`;
+      const syntheticInvoice = {
+        id: `in_test_s10_${world.testRun.testRunId.replace(/-/g, "_")}`,
+        object: "invoice",
+        subscription: subId,
+        status: "open",
+        attempt_count: 1,
+        amount_due: 40000,
+        currency: "usd",
+        hosted_invoice_url: fakeInvoiceUrl,
+      };
+
+      const eventPayload = JSON.stringify({
+        id: eventId,
+        object: "event",
+        api_version: "2025-09-30.clover",
+        created: Math.floor(Date.now() / 1000),
+        livemode: false,
+        pending_webhooks: 0,
+        type: "invoice.payment_failed",
+        data: { object: syntheticInvoice },
+      });
+
+      const webhookSecret = env.stripe!.webhookSecret;
+      const signature = stripe.webhooks.generateTestHeaderString({
+        payload: eventPayload,
+        secret: webhookSecret!,
+      });
+
+      const res = await request.post(`${baseUrl}/api/stripe/webhook`, {
+        data: eventPayload,
+        headers: { "Content-Type": "application/json", "stripe-signature": signature },
+      });
+      expect(res.status(), `Webhook must accept invoice.payment_failed, got: ${await res.text()}`).toBe(200);
+
+      // Poll: anchor payment must gain hostedInvoiceUrl
+      let payments = await findPaymentsByStripeSubscriptionId(subId);
+      for (let i = 0; i < 15 && !payments.find((p) => p.hostedInvoiceUrl); i++) {
+        await new Promise((r) => setTimeout(r, 400));
+        payments = await findPaymentsByStripeSubscriptionId(subId);
+      }
+
+      const anchor = payments[0];
+      expect(anchor, "Anchor MONTHLY_CHECKIN payment must exist").toBeDefined();
+      expect(anchor.hostedInvoiceUrl, "hostedInvoiceUrl must be persisted on anchor payment").toBe(fakeInvoiceUrl);
+
+      // No MONTHLY_RENEWAL must have been created by invoice.payment_failed
+      const renewals = payments.filter((p) => p.type === "MONTHLY_RENEWAL");
+      expect(renewals.length, "invoice.payment_failed must not create a MONTHLY_RENEWAL row").toBe(0);
+
+      // Needs Review: SUBSCRIPTION_PAYMENT_FAILED actionHref must equal fakeInvoiceUrl
+      await authenticateAdmin(request);
+      const nrRes = await request.get(`${baseUrl}/api/admin/reconcile/needs-review`);
+      expect(nrRes.status()).toBe(200);
+      const nrBody = await nrRes.json() as { items: Array<{ code: string; actionHref?: string; related?: { sessionId?: string } }> };
+      const nrItem = nrBody.items.find(
+        (i) => i.code === "SUBSCRIPTION_PAYMENT_FAILED" && i.related?.sessionId === seededSession.id,
+      );
+      expect(nrItem, "SUBSCRIPTION_PAYMENT_FAILED Needs Review item must exist").toBeDefined();
+      expect(nrItem!.actionHref, "actionHref must equal the invoice recovery URL").toBe(fakeInvoiceUrl);
+    } finally {
+      await world.cleanup();
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// SUB-011: invoice.payment_succeeded (renewal) stores hostedInvoiceUrl on MONTHLY_RENEWAL
+// ---------------------------------------------------------------------------
+test(
+  "SUB-011: invoice.payment_succeeded (renewal) persists hosted_invoice_url on the created MONTHLY_RENEWAL payment",
+  async ({ request }, testInfo) => {
+    const world = createWorld(testInfo);
+    const stripe = getE2EStripe();
+    const env = getE2EEnv();
+    const baseUrl = env.baseUrl;
+
+    try {
+      await resetDb();
+
+      const subId = `sub_test_s11_${world.testRun.testRunId.replace(/-/g, "_").slice(0, 14)}`;
+      await seedMonthlyActiveSession({ testRun: world.testRun, stripeSubscriptionId: subId });
+
+      const renewalInvoiceId = `in_test_s11_${world.testRun.testRunId.replace(/-/g, "_")}`;
+      const renewalPiId = `pi_test_s11_${world.testRun.testRunId.replace(/-/g, "_")}`;
+      const fakeInvoiceUrl = `https://invoice.stripe.com/i/test_s11_${world.testRun.testRunId.replace(/-/g, "")}`;
+
+      const eventPayload = JSON.stringify({
+        id: `evt_test_s11_${world.testRun.testRunId.replace(/-/g, "_")}`,
+        object: "event",
+        api_version: "2025-09-30.clover",
+        created: Math.floor(Date.now() / 1000),
+        livemode: false,
+        pending_webhooks: 0,
+        type: "invoice.payment_succeeded",
+        data: {
+          object: {
+            id: renewalInvoiceId,
+            object: "invoice",
+            subscription: subId,
+            billing_reason: "subscription_cycle",
+            status: "paid",
+            amount_paid: 40000,
+            currency: "usd",
+            payment_intent: renewalPiId,
+            hosted_invoice_url: fakeInvoiceUrl,
+          },
+        },
+      });
+
+      const webhookSecret = env.stripe!.webhookSecret;
+      const signature = stripe.webhooks.generateTestHeaderString({
+        payload: eventPayload,
+        secret: webhookSecret!,
+      });
+
+      const res = await request.post(`${baseUrl}/api/stripe/webhook`, {
+        data: eventPayload,
+        headers: { "Content-Type": "application/json", "stripe-signature": signature },
+      });
+      expect(res.status(), `Webhook must accept invoice.payment_succeeded, got: ${await res.text()}`).toBe(200);
+
+      // Poll: MONTHLY_RENEWAL with this invoice ID must appear with hostedInvoiceUrl set
+      let payments = await findPaymentsByStripeSubscriptionId(subId);
+      let renewal = payments.find((p) => p.type === "MONTHLY_RENEWAL" && p.stripeInvoiceId === renewalInvoiceId);
+      for (let i = 0; i < 15 && !renewal?.hostedInvoiceUrl; i++) {
+        await new Promise((r) => setTimeout(r, 400));
+        payments = await findPaymentsByStripeSubscriptionId(subId);
+        renewal = payments.find((p) => p.type === "MONTHLY_RENEWAL" && p.stripeInvoiceId === renewalInvoiceId);
+      }
+
+      expect(renewal, "MONTHLY_RENEWAL payment must be created").toBeDefined();
+      expect(renewal!.hostedInvoiceUrl, "MONTHLY_RENEWAL must carry hostedInvoiceUrl").toBe(fakeInvoiceUrl);
+
+      // The anchor MONTHLY_CHECKIN row must NOT have been overwritten with the renewal's URL.
+      const anchor = payments.find((p) => p.type === "MONTHLY_CHECKIN");
+      expect(anchor).toBeDefined();
+      expect(anchor!.hostedInvoiceUrl, "MONTHLY_CHECKIN anchor row must not receive renewal invoice URL").toBeNull();
+    } finally {
+      await world.cleanup();
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// SUB-012: CHECKIN rows seeded without invoice context have null hostedInvoiceUrl
+// ---------------------------------------------------------------------------
+test(
+  "SUB-012: MONTHLY_CHECKIN rows seeded without an invoice have null hostedInvoiceUrl",
+  async ({}, testInfo) => {
+    const world = createWorld(testInfo);
+
+    try {
+      await resetDb();
+
+      const subId = `sub_test_s12_${world.testRun.testRunId.replace(/-/g, "_").slice(0, 14)}`;
+      await seedMonthlyActiveSession({ testRun: world.testRun, stripeSubscriptionId: subId });
+
+      const payments = await findPaymentsByStripeSubscriptionId(subId);
+      const anchor = payments.find((p) => p.type === "MONTHLY_CHECKIN");
+
+      expect(anchor, "MONTHLY_CHECKIN payment must exist after seed").toBeDefined();
+      expect(anchor!.hostedInvoiceUrl, "MONTHLY_CHECKIN starts with null hostedInvoiceUrl — no invoice event fired").toBeNull();
     } finally {
       await world.cleanup();
     }
