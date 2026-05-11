@@ -2,6 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { getSettings } from "@/lib/settings";
 import { computeOverstayFee } from "@/lib/rates";
 import { countFreeSpots } from "@/lib/spots";
+import { isAccessBlocked } from "@/lib/billing-access";
 import { handler, json } from "@/lib/api-handler";
 import { DriverStateQuerySchema } from "@/lib/schemas";
 import { RATE_LIMITS } from "@/lib/rate-limit";
@@ -130,6 +131,9 @@ export const GET = handler(
 
     const hasActive = sessionsWithEffectiveStatus.some((s) => s.effectiveStatus === "ACTIVE");
     const hasOverstay = overstaySessions.length > 0;
+    const hasDelinquent = sessionsWithEffectiveStatus.some((s) =>
+      isAccessBlocked(s.billingStatus, settings.failedPaymentPolicy, s.billingFailedAt, settings.failedPaymentGraceDays),
+    );
 
     if (hasOverstay) {
       allowedActions.push({
@@ -152,9 +156,18 @@ export const GET = handler(
     } else if (hasActive) {
       allowedActions.push({
         code: "OPEN_GATE",
-        enabled: true,
+        enabled: !hasDelinquent,
         label: "Open Gate",
+        reason: hasDelinquent ? "Account suspended — billing issue" : undefined,
       });
+      if (hasDelinquent) {
+        denials.push({
+          code: DenialCode.SUBSCRIPTION_DELINQUENT,
+          message: "Gate access is suspended due to a billing issue. Contact the lot manager.",
+          severity: "critical",
+          recoverable: false,
+        });
+      }
       allowedActions.push({
         code: "REQUEST_EXTENSION_CHECKOUT",
         enabled: !hasMonthly,
@@ -192,9 +205,13 @@ export const GET = handler(
     }
 
     const gateEligibility = {
-      entrance: hasActive && !hasOverstay,
-      exit: hasActive || hasOverstay,
-      blockedReason: hasOverstay ? "Settle overstay first" : undefined,
+      entrance: hasActive && !hasOverstay && !hasDelinquent,
+      exit: (hasActive || hasOverstay) && !hasDelinquent,
+      blockedReason: hasDelinquent
+        ? "Account suspended — billing issue"
+        : hasOverstay
+          ? "Settle overstay first"
+          : undefined,
     };
 
     // Serialize sessions to the wire shape (strip DB internals)

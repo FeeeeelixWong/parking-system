@@ -3,6 +3,8 @@ import { prisma } from "@/lib/prisma";
 import { triggerGateOpen, checkSuspiciousEntry } from "@/lib/gate";
 import { log as audit } from "@/lib/audit";
 import { handler, json } from "@/lib/api-handler";
+import { getSettings } from "@/lib/settings";
+import { isAccessBlocked } from "@/lib/billing-access";
 import { DenialCode } from "@/types/actions";
 import type { TypedDenial } from "@/types/actions";
 
@@ -35,7 +37,7 @@ export const POST = handler(
 
     const session = await prisma.session.findUnique({
       where: { id: sessionId },
-      select: { id: true, status: true, expectedEnd: true, driverId: true },
+      select: { id: true, status: true, expectedEnd: true, driverId: true, billingStatus: true, billingFailedAt: true },
     });
 
     if (!session || session.driverId !== driverId) {
@@ -64,6 +66,22 @@ export const POST = handler(
         code: DenialCode.SESSION_NOT_ACTIVE,
         message: "No active session found.",
         severity: "warning",
+        recoverable: false,
+      });
+    }
+
+    const settings = await getSettings();
+    if (isAccessBlocked(session.billingStatus, settings.failedPaymentPolicy, session.billingFailedAt, settings.failedPaymentGraceDays)) {
+      await audit({
+        action: "GATE_DENIED",
+        sessionId,
+        driverId,
+        details: `GATE_DENIED — SUBSCRIPTION_DELINQUENT — billingStatus:${session.billingStatus} policy:${settings.failedPaymentPolicy}`,
+      }).catch(() => {});
+      return denial({
+        code: DenialCode.SUBSCRIPTION_DELINQUENT,
+        message: "Gate access is suspended due to a billing issue. Contact the lot manager.",
+        severity: "critical",
         recoverable: false,
       });
     }

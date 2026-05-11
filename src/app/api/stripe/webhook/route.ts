@@ -3,6 +3,7 @@ import type Stripe from "stripe";
 import { prisma } from "@/lib/prisma";
 import { constructWebhookEvent, getStripe, StripeConfigError } from "@/lib/stripe";
 import { log as audit } from "@/lib/audit";
+import { classifySubscriptionDeletion } from "@/lib/billing-access";
 import {
   processCheckoutSession,
   processChargeRefund,
@@ -305,7 +306,7 @@ async function handleInvoicePaymentFailed(event: Stripe.Event) {
 
   await prisma.session.update({
     where: { id: firstPayment.session.id },
-    data: { billingStatus: "PAYMENT_FAILED" },
+    data: { billingStatus: "PAYMENT_FAILED", billingFailedAt: new Date() },
   });
 
   await audit({
@@ -349,35 +350,142 @@ async function handleSubscriptionDeleted(event: Stripe.Event) {
 
   const firstPayment = await prisma.payment.findFirst({
     where: { stripeSubscriptionId: sub.id },
-    include: { session: true },
+    include: {
+      session: {
+        select: {
+          id: true,
+          driverId: true,
+          status: true,
+          billingCancelledByAdmin: true,
+          expectedEnd: true,
+        },
+      },
+    },
   });
   if (!firstPayment) return;
 
   const session = firstPayment.session;
-
-  // If the admin already cancelled this session in the DB (and Stripe is confirming
-  // the subscription is gone), treat as a no-op — billing status is already handled.
-  if (session.status === "CANCELLED") return;
-
   const now = new Date();
+  const classification = classifySubscriptionDeletion(sub, session, now);
 
-  // Clamp session end to now for immediate mid-period cancellations.
-  // For period-end cancellations, expectedEnd was already set correctly by the
-  // last invoice.payment_succeeded renewal webhook, so this is a no-op.
-  const newEnd = session.expectedEnd < now ? session.expectedEnd : now;
+  switch (classification.kind) {
+    case "already_ended":
+      // Session is CANCELLED or COMPLETED — no further mutation needed.
+      return;
 
-  await prisma.session.update({
-    where: { id: session.id },
-    data: {
-      billingStatus: "DELINQUENT",
-      ...(newEnd < session.expectedEnd ? { expectedEnd: newEnd } : {}),
-    },
-  });
+    case "admin_planned": {
+      if (!classification.accessEnded) {
+        // Custom access window still open — suppress any delinquency signal, leave ACTIVE.
+        return;
+      }
+      // Paid period has elapsed — close cleanly as COMPLETED (not CANCELLED, to avoid
+      // false-positive CANCELLED_SESSION_WITH_UNRECONCILED_CHARGE in reconcile).
+      const newEnd = session.expectedEnd < now ? session.expectedEnd : now;
+      await prisma.session.update({
+        where: { id: session.id },
+        data: {
+          status: "COMPLETED",
+          ...(newEnd < session.expectedEnd ? { expectedEnd: newEnd } : {}),
+        },
+      });
+      await audit({
+        action: "SUBSCRIPTION_CANCELED",
+        sessionId: session.id,
+        driverId: session.driverId,
+        details: `Subscription ${sub.id} canceled at period end — admin-planned (not delinquency). Paid period elapsed; session closed cleanly as COMPLETED.`,
+      });
+      return;
+    }
 
-  await audit({
-    action: "SUBSCRIPTION_CANCELED",
-    sessionId: session.id,
-    driverId: session.driverId,
-    details: `Subscription ${sub.id} canceled — access ends ${newEnd.toISOString()}. If driver is on property, cron will detect overstay on next run.`,
-  });
+    case "payment_failed": {
+      const newEnd = session.expectedEnd < now ? session.expectedEnd : now;
+      await prisma.session.update({
+        where: { id: session.id },
+        data: {
+          billingStatus: "DELINQUENT",
+          billingDelinquentAt: now,
+          ...(newEnd < session.expectedEnd ? { expectedEnd: newEnd } : {}),
+        },
+      });
+      await audit({
+        action: "SUBSCRIPTION_CANCELED",
+        sessionId: session.id,
+        driverId: session.driverId,
+        details: `Subscription ${sub.id} canceled due to payment failure (dunning exhausted). Access ends ${newEnd.toISOString()}. If driver is on property, cron will detect overstay.`,
+      });
+      return;
+    }
+
+    case "payment_disputed": {
+      // TODO: Add a dedicated DISPUTED billingStatus and SUBSCRIPTION_ENDED_OUTSIDE_APP
+      // Needs Review code for dispute-driven cancellations. For now DELINQUENT blocks gate.
+      const newEnd = session.expectedEnd < now ? session.expectedEnd : now;
+      await prisma.session.update({
+        where: { id: session.id },
+        data: {
+          billingStatus: "DELINQUENT",
+          billingDelinquentAt: now,
+          ...(newEnd < session.expectedEnd ? { expectedEnd: newEnd } : {}),
+        },
+      });
+      await audit({
+        action: "SUBSCRIPTION_CANCELED",
+        sessionId: session.id,
+        driverId: session.driverId,
+        details: `Subscription ${sub.id} canceled due to payment dispute — not ordinary dunning. Review the dispute in the Stripe dashboard. Access blocked pending resolution.`,
+      });
+      return;
+    }
+
+    case "planned_expiry": {
+      if (!classification.accessEnded) {
+        // cancel_at_period_end or cancellation_requested with future expectedEnd —
+        // the period hasn't elapsed yet; leave session ACTIVE.
+        return;
+      }
+      // Natural expiry (cancel_at = expectedEnd set at checkout, or cancellation_requested)
+      // with the access period now elapsed — close cleanly as COMPLETED.
+      const newEnd = session.expectedEnd < now ? session.expectedEnd : now;
+      await prisma.session.update({
+        where: { id: session.id },
+        data: {
+          status: "COMPLETED",
+          ...(newEnd < session.expectedEnd ? { expectedEnd: newEnd } : {}),
+        },
+      });
+      await audit({
+        action: "SUBSCRIPTION_CANCELED",
+        sessionId: session.id,
+        driverId: session.driverId,
+        details: `Subscription ${sub.id} ended at planned expiry (cancel_at / cancellation_requested). Session closed cleanly as COMPLETED.`,
+      });
+      return;
+    }
+
+    case "unknown": {
+      // TODO: Add SUBSCRIPTION_ENDED_OUTSIDE_APP Needs Review code.
+      // No clear payment failure signal — do not auto-DELINQUENT. If the period has elapsed,
+      // close as COMPLETED; otherwise leave ACTIVE and surface the anomaly via audit.
+      if (classification.accessEnded) {
+        const newEnd = session.expectedEnd < now ? session.expectedEnd : now;
+        await prisma.session.update({
+          where: { id: session.id },
+          data: {
+            status: "COMPLETED",
+            ...(newEnd < session.expectedEnd ? { expectedEnd: newEnd } : {}),
+          },
+        });
+      }
+      await audit({
+        action: "SUBSCRIPTION_CANCELED",
+        sessionId: session.id,
+        driverId: session.driverId,
+        // Stable prefix [SUB_DEL:UNKNOWN] — the needs-review feed queries on this prefix
+        // to surface the deletion for admin review. Do not change without updating
+        // src/app/api/admin/reconcile/needs-review/route.ts.
+        details: `[SUB_DEL:UNKNOWN] Subscription ${sub.id} ended with unknown reason — outside expected app flow. Manual review required. Session ${classification.accessEnded ? "closed as COMPLETED" : "left ACTIVE until expectedEnd"}.`,
+      });
+      return;
+    }
+  }
 }
