@@ -158,7 +158,10 @@ model Session {
   expectedEnd        DateTime
   endedAt            DateTime?
   status             SessionStatus @default(ACTIVE)
-  billingStatus      BillingStatus @default(CURRENT)
+  billingStatus       BillingStatus @default(CURRENT)
+  billingFailedAt     DateTime?     // set when invoice.payment_failed fires
+  billingDelinquentAt     DateTime?     // set when subscription.deleted fires or grace period elapses
+  billingCancelledByAdmin Boolean       @default(false)
   cancellationDisposition CancellationDisposition @default(N_A)
   reminderSent       Boolean       @default(false)
   overstayAlertSent  Boolean       @default(false)
@@ -263,6 +266,12 @@ model Settings {
   overstayRateTruck     Float   @default(25.0)
   gracePeriodMinutes    Int     @default(15)
   reminderMinutesBefore Int     @default(60)
+  // Subscription billing policy — controls when PAYMENT_FAILED becomes access-blocking.
+  // "on_subscription_deleted": only DELINQUENT blocks (default, current behavior).
+  // "immediate_on_payment_failed": block immediately on first invoice failure.
+  // "after_grace_days": block after failedPaymentGraceDays days of PAYMENT_FAILED.
+  failedPaymentPolicy    String  @default("on_subscription_deleted")
+  failedPaymentGraceDays Int     @default(7)
   totalSpotsBobtail     Int     @default(45)
   totalSpotsTruck       Int     @default(100)
   managerEmail          String  @default("")
