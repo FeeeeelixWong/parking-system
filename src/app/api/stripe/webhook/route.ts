@@ -149,12 +149,14 @@ async function handleCheckoutSessionCompleted(event: Stripe.Event) {
  * For renewals: advance expectedEnd, create MONTHLY_RENEWAL Payment, write QB receipt.
  */
 async function handleInvoicePaymentSucceeded(event: Stripe.Event) {
-  // `invoice.subscription` and `invoice.payment_intent` were removed from
-  // the Stripe.Invoice base type in SDK v20. Cast to access.
+  // `invoice.subscription`, `invoice.payment_intent`, and `invoice.hosted_invoice_url`
+  // were removed from the Stripe.Invoice base type in SDK v20. Cast to access.
   const invoice = event.data.object as Stripe.Invoice & {
     subscription?: string | Stripe.Subscription | null;
     payment_intent?: string | Stripe.PaymentIntent | null;
+    hosted_invoice_url?: string | null;
   };
+  const hostedInvoiceUrl = invoice.hosted_invoice_url ?? null;
 
   const subscriptionId = typeof invoice.subscription === "string"
     ? invoice.subscription
@@ -196,8 +198,14 @@ async function handleInvoicePaymentSucceeded(event: Stripe.Event) {
 
     // Backfill stripeChargeId — it was null at checkout time (charge hadn't settled yet).
     // Do this before writeSalesReceiptSafe so the updateMany({ where: stripeChargeId }) finds the row.
-    if (!payment.stripeChargeId) {
-      await prisma.payment.update({ where: { id: payment.id }, data: { stripeChargeId: chargeId } });
+    if (!payment.stripeChargeId || (hostedInvoiceUrl && !payment.hostedInvoiceUrl)) {
+      await prisma.payment.update({
+        where: { id: payment.id },
+        data: {
+          ...(payment.stripeChargeId ? {} : { stripeChargeId: chargeId }),
+          ...(hostedInvoiceUrl && !payment.hostedInvoiceUrl ? { hostedInvoiceUrl } : {}),
+        },
+      });
     }
 
     const vt0 = vehicleTypeLabel(payment.session.vehicle.type);
@@ -253,6 +261,9 @@ async function handleInvoicePaymentSucceeded(event: Stripe.Event) {
         stripeChargeId: chargeId,
       });
     }
+    if (hostedInvoiceUrl && !existingRenewal.hostedInvoiceUrl) {
+      await prisma.payment.update({ where: { id: existingRenewal.id }, data: { hostedInvoiceUrl } });
+    }
     return;
   }
 
@@ -272,6 +283,7 @@ async function handleInvoicePaymentSucceeded(event: Stripe.Event) {
         stripeChargeId: chargeId,
         stripeSubscriptionId: subscriptionId,
         stripeInvoiceId: invoice.id,
+        hostedInvoiceUrl,
       },
     }),
   ]);
@@ -292,6 +304,7 @@ async function handleInvoicePaymentSucceeded(event: Stripe.Event) {
 async function handleInvoicePaymentFailed(event: Stripe.Event) {
   const invoice = event.data.object as Stripe.Invoice & {
     subscription?: string | Stripe.Subscription | null;
+    hosted_invoice_url?: string | null;
   };
   const subscriptionId = typeof invoice.subscription === "string"
     ? invoice.subscription
@@ -304,10 +317,23 @@ async function handleInvoicePaymentFailed(event: Stripe.Event) {
   });
   if (!firstPayment) return;
 
+  const hostedInvoiceUrl = invoice.hosted_invoice_url ?? null;
+
   await prisma.session.update({
     where: { id: firstPayment.session.id },
     data: { billingStatus: "PAYMENT_FAILED", billingFailedAt: new Date() },
   });
+
+  // Persist the invoice recovery link on the anchor payment so the
+  // Needs Review SUBSCRIPTION_PAYMENT_FAILED item can surface a direct
+  // "Open invoice" action. Updated on every failed-invoice event so it
+  // always reflects the latest failure.
+  if (hostedInvoiceUrl) {
+    await prisma.payment.update({
+      where: { id: firstPayment.id },
+      data: { hostedInvoiceUrl },
+    });
+  }
 
   await audit({
     action: "RECURRING_CHARGE_FAILED",
