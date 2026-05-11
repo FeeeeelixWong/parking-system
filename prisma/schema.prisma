@@ -198,6 +198,7 @@ model Payment {
   stripeChargeId          String?           // ch_... — the actual charge record
   stripeSubscriptionId    String?           // sub_... — only for MONTHLY_RENEWAL rows
   stripeInvoiceId         String?           // in_... — subscription invoice that produced this charge
+  hostedInvoiceUrl        String?           // hosted_invoice_url from Stripe Invoice — for payment recovery links
 
   // ─── QuickBooks accounting mirror IDs ────────────────────────────────
   // Populated after the webhook successfully writes to QB. Used for
