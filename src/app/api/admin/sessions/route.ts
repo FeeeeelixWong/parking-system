@@ -32,8 +32,8 @@ const SessionEditBody = z.object({
     "REFUND_PARTIAL_CUSTOM",
     "RETAINED_INTENTIONAL",
   ]).optional(),
-  // For cancel-subscription (legacy): immediately=true cancels now, false=cancel at period end
-  // TODO: deprecate once monthly UI fully migrated to cancel-monthly-session.
+  // Formerly used by cancel-subscription (now hard-denied). Field retained to avoid breaking
+  // any existing JSON payloads in flight; ignored by all current handlers.
   cancelImmediately: z.boolean().optional(),
   // For cancel-monthly-session: atomic refund + Stripe sub action + session update.
   accessEndsAt: z.union([z.literal("period_end"), z.literal("now"), z.string().datetime()]).optional(),
@@ -533,7 +533,7 @@ export const PUT = handler({ body: SessionEditBody }, async ({ body }) => {
             expectedEnd: effectiveEnd,
             ...(newEndedAt !== session.endedAt ? { endedAt: newEndedAt } : {}),
             ...(newStatus  !== session.status  ? { status:  newStatus  } : {}),
-            ...(renewalAction === "stop"        ? { billingStatus: "CURRENT" } : {}),
+            ...(renewalAction === "stop"        ? { billingStatus: "CURRENT", billingCancelledByAdmin: true } : {}),
           },
         });
 
@@ -623,33 +623,13 @@ export const PUT = handler({ body: SessionEditBody }, async ({ body }) => {
   }
 
   if (action === "cancel-subscription") {
-    if (!stripeConfigured()) {
-      return json({ error: "Stripe not configured" }, { status: 400 });
-    }
-    const monthlyPayment = await prisma.payment.findFirst({
-      where: { sessionId, stripeSubscriptionId: { not: null } },
-      select: { stripeSubscriptionId: true },
-    });
-    const subscriptionId = monthlyPayment?.stripeSubscriptionId;
-    if (!subscriptionId) {
-      return json({ error: "No active subscription found for this session" }, { status: 400 });
-    }
-    const stripe = getStripe();
-    const immediately = body.cancelImmediately ?? false;
-    if (immediately) {
-      await stripe.subscriptions.cancel(subscriptionId);
-      // customer.subscription.deleted webhook will clamp expectedEnd + set DELINQUENT
-    } else {
-      await stripe.subscriptions.update(subscriptionId, { cancel_at_period_end: true });
-      // Access continues through expectedEnd; no webhook fires until the period ends
-    }
-    await audit({
-      action: "SUBSCRIPTION_CANCELED",
-      sessionId,
-      driverId: session.driverId,
-      details: `Admin canceled subscription ${subscriptionId} ${immediately ? "immediately" : "at period end"}.`,
-    });
-    return json({ success: true, subscriptionId, immediately });
+    // Deprecated — use cancel-monthly-session instead. Hard-denied here so callers
+    // receive a clear error rather than silently recreating the DELINQUENT webhook drift
+    // that billingCancelledByAdmin was introduced to prevent.
+    return json(
+      { error: "cancel-subscription is deprecated. Use cancel-monthly-session instead." },
+      { status: 410 },
+    );
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -880,8 +860,25 @@ export const PUT = handler({ body: SessionEditBody }, async ({ body }) => {
     const stripe = getStripe();
     let stripeLanded = false;
     let subAlreadyCancelled = false;
+    let flagSet = false;
     try {
-      // ── Step 2: Stripe subscription action ─────────────────────────────────
+      // ── Step 2: persist admin-cancel intent BEFORE Stripe ─────────────────
+      // Setting billingCancelledByAdmin=true before the Stripe call closes a race
+      // where Stripe's customer.subscription.deleted webhook can land while we're
+      // mid-flight (especially under retries or load). The webhook classifier
+      // checks this flag first; without it, a fast webhook arrival would
+      // misclassify an admin-initiated cancellation as planned_expiry/unknown
+      // and emit misleading audit entries. If Stripe fails below we roll back
+      // the flag — otherwise a stranded flag would cause a later Stripe-initiated
+      // deletion (e.g. payment-retry exhaustion) to be misclassified as
+      // admin-planned and silently skip the DELINQUENT mark.
+      await prisma.session.update({
+        where: { id: sessionId },
+        data: { billingCancelledByAdmin: true },
+      });
+      flagSet = true;
+
+      // ── Step 3: Stripe subscription action ───────────────────────────────
       try {
         if (mode === "period_end") {
           await stripe.subscriptions.update(subscriptionId, { cancel_at_period_end: true });
@@ -904,7 +901,8 @@ export const PUT = handler({ body: SessionEditBody }, async ({ body }) => {
       }
       stripeLanded = true;
 
-      // ── Step 3: session row update ───────────────────────────────────────
+      // ── Step 4: remaining session row update ─────────────────────────────
+      // billingCancelledByAdmin was already set in step 2.
       if (mode === "now") {
         await prisma.session.update({
           where: { id: sessionId },
@@ -916,14 +914,23 @@ export const PUT = handler({ body: SessionEditBody }, async ({ body }) => {
           },
         });
       } else if (mode === "custom") {
-        // custom future date — keep ACTIVE, shorten expectedEnd, cron flips later
+        // custom future date — keep ACTIVE, shorten expectedEnd, cron flips later.
         await prisma.session.update({
           where: { id: sessionId },
           data: { expectedEnd: customDate!, billingStatus: "CURRENT", cancellationDisposition },
         });
       }
-      // period_end: no session row change; webhook will complete it on next period boundary
+      // mode === "period_end": no further session update; Stripe fires deleted later.
     } catch (e) {
+      // Roll back the flag if Stripe did not land. A stranded billingCancelledByAdmin
+      // on a live subscription would cause a later Stripe-initiated deletion to be
+      // misclassified as admin-planned.
+      if (flagSet && !stripeLanded) {
+        await prisma.session.update({
+          where: { id: sessionId },
+          data: { billingCancelledByAdmin: false },
+        }).catch(() => {});
+      }
       const msg = e instanceof Error ? e.message : "Unknown failure";
       return json(
         {
