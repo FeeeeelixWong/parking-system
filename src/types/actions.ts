@@ -39,6 +39,7 @@ export const DenialCode = {
   LOT_FULL: "LOT_FULL",
   NO_DRIVER_FOUND: "NO_DRIVER_FOUND",
   BOBTAIL_MONTHLY_NOT_ALLOWED: "BOBTAIL_MONTHLY_NOT_ALLOWED",
+  SUBSCRIPTION_DELINQUENT: "SUBSCRIPTION_DELINQUENT",
 } as const;
 
 export type DenialCodeType = (typeof DenialCode)[keyof typeof DenialCode];

@@ -86,7 +86,7 @@ export function handler<
 
     try {
       // Rate limit (per-IP + route)
-      if (opts.rateLimit) {
+      if (opts.rateLimit && process.env.PLAYWRIGHT_TEST !== "true") {
         const ip = getClientIp(req.headers);
         const key = `${ip}:${method}:${route}`;
         const result = checkRateLimit(key, opts.rateLimit);

@@ -305,6 +305,32 @@ export default function SettingsTab({
             </label>
           </div>
         </SettingsGroup>
+        <SettingsGroup title="Subscription Delinquency">
+          <div>
+            <label style={{ fontSize: 12, color: FG_DIM, display: "block", marginBottom: 4 }}>
+              Block gate access when
+            </label>
+            <select
+              value={settingsForm.failedPaymentPolicy ?? "on_subscription_deleted"}
+              onChange={(e) => setSettingsForm({ ...settingsForm, failedPaymentPolicy: e.target.value as AppSettings["failedPaymentPolicy"] })}
+              style={inputStyle}
+            >
+              <option value="on_subscription_deleted">Subscription is canceled by Stripe</option>
+              <option value="immediate_on_payment_failed">First payment failure (immediately)</option>
+              <option value="after_grace_days">Payment fails and grace period elapses</option>
+            </select>
+            <div style={{ fontSize: 10, color: FG_DIM, marginTop: 4 }}>
+              Controls when a failed subscription payment suspends gate access for that driver.
+            </div>
+          </div>
+          {settingsForm.failedPaymentPolicy === "after_grace_days" && (
+            <SettingsField
+              label="Grace period (days)"
+              value={settingsForm.failedPaymentGraceDays ?? 7}
+              onChange={(v) => setSettingsForm({ ...settingsForm, failedPaymentGraceDays: v })}
+            />
+          )}
+        </SettingsGroup>
         <SettingsGroup title="QuickBooks Connection">
           <QBConnectionStatus />
         </SettingsGroup>

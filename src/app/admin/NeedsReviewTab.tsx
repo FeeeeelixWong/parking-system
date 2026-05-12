@@ -112,11 +112,12 @@ function ReviewAction({
   onRun: (item: NeedsReviewItem) => void;
 }) {
   const path = actionPath(item);
-  const label = item.actionLabel ?? "View details";
 
+  // Internal POST action (QB receipt sync, etc.)
   if (path) {
     const pending = state === "pending";
     const success = state === "success";
+    const label = item.actionLabel ?? "Sync";
     return (
       <button
         disabled={pending || success}
@@ -138,25 +139,32 @@ function ReviewAction({
     );
   }
 
-  return (
-    <button
-      disabled
-      title="Open the Sessions Ledger or related advanced view for details."
-      style={{
-        padding: "7px 11px",
-        borderRadius: 5,
-        border: `1px solid ${BORDER}`,
-        background: "#F8FAFC",
-        color: FG_MUTED,
-        fontSize: 12,
-        fontWeight: 700,
-        cursor: "default",
-        whiteSpace: "nowrap",
-      }}
-    >
-      {label}
-    </button>
-  );
+  // External link action (Stripe invoice, QB dashboard, etc.)
+  if (item.actionHref && item.actionLabel) {
+    return (
+      <a
+        href={item.actionHref}
+        target="_blank"
+        rel="noreferrer"
+        style={{
+          display: "inline-block",
+          padding: "7px 11px",
+          borderRadius: 5,
+          border: `1px solid ${WARN_BORDER}`,
+          background: WARN_LIGHT,
+          color: WARN,
+          fontSize: 12,
+          fontWeight: 700,
+          textDecoration: "none",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {item.actionLabel} ↗
+      </a>
+    );
+  }
+
+  return null;
 }
 
 function ReviewCard({

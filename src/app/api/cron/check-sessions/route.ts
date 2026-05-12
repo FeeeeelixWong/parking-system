@@ -88,7 +88,37 @@ export async function GET() {
     );
   }
 
-  // 3. Notify manager — only for sessions whose alert has NOT been sent yet.
+  // 3. Escalate PAYMENT_FAILED → DELINQUENT when the grace period has elapsed.
+  //    Only runs when the admin has configured the "after_grace_days" policy.
+  if (settings.failedPaymentPolicy === "after_grace_days") {
+    const graceMs = settings.failedPaymentGraceDays * 24 * 60 * 60 * 1000;
+    const billingGraceThreshold = new Date(now.getTime() - graceMs);
+    const toEscalate = await prisma.session.findMany({
+      where: {
+        billingStatus: "PAYMENT_FAILED",
+        billingFailedAt: { lte: billingGraceThreshold },
+      },
+      select: { id: true, driverId: true },
+    });
+    if (toEscalate.length > 0) {
+      await prisma.session.updateMany({
+        where: { id: { in: toEscalate.map((s) => s.id) } },
+        data: { billingStatus: "DELINQUENT", billingDelinquentAt: now },
+      });
+      await Promise.all(
+        toEscalate.map((s) =>
+          audit({
+            action: "SUBSCRIPTION_CANCELED",
+            sessionId: s.id,
+            driverId: s.driverId,
+            details: `Grace period (${settings.failedPaymentGraceDays}d) elapsed — escalated PAYMENT_FAILED → DELINQUENT`,
+          })
+        )
+      );
+    }
+  }
+
+  // 4. Notify manager — only for sessions whose alert has NOT been sent yet.
   // This prevents duplicate alerts when the cron runs multiple times before
   // a driver exits.
   const unalertedOverstays = await prisma.session.findMany({

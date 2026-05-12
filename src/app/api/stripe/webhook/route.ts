@@ -3,6 +3,7 @@ import type Stripe from "stripe";
 import { prisma } from "@/lib/prisma";
 import { constructWebhookEvent, getStripe, StripeConfigError } from "@/lib/stripe";
 import { log as audit } from "@/lib/audit";
+import { classifySubscriptionDeletion } from "@/lib/billing-access";
 import {
   processCheckoutSession,
   processChargeRefund,
@@ -148,12 +149,14 @@ async function handleCheckoutSessionCompleted(event: Stripe.Event) {
  * For renewals: advance expectedEnd, create MONTHLY_RENEWAL Payment, write QB receipt.
  */
 async function handleInvoicePaymentSucceeded(event: Stripe.Event) {
-  // `invoice.subscription` and `invoice.payment_intent` were removed from
-  // the Stripe.Invoice base type in SDK v20. Cast to access.
+  // `invoice.subscription`, `invoice.payment_intent`, and `invoice.hosted_invoice_url`
+  // were removed from the Stripe.Invoice base type in SDK v20. Cast to access.
   const invoice = event.data.object as Stripe.Invoice & {
     subscription?: string | Stripe.Subscription | null;
     payment_intent?: string | Stripe.PaymentIntent | null;
+    hosted_invoice_url?: string | null;
   };
+  const hostedInvoiceUrl = invoice.hosted_invoice_url ?? null;
 
   const subscriptionId = typeof invoice.subscription === "string"
     ? invoice.subscription
@@ -166,22 +169,31 @@ async function handleInvoicePaymentSucceeded(event: Stripe.Event) {
   const stripe = getStripe();
   let chargeId: string | null = null;
   let paymentIntentId: string | null = null;
-  const invoicePayments = await stripe.invoicePayments.list({ invoice: invoice.id, limit: 1 });
-  const invoicePayment = invoicePayments.data[0];
-  if (invoicePayment) {
-    const piRef = invoicePayment.payment?.payment_intent;
-    paymentIntentId = typeof piRef === "string" ? piRef : piRef?.id ?? null;
-    if (paymentIntentId) {
-      const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
-      chargeId = typeof pi.latest_charge === "string" ? pi.latest_charge : pi.latest_charge?.id ?? null;
+  try {
+    const invoicePayments = await stripe.invoicePayments.list({ invoice: invoice.id, limit: 1 });
+    const invoicePayment = invoicePayments.data[0];
+    if (invoicePayment) {
+      const piRef = invoicePayment.payment?.payment_intent;
+      paymentIntentId = typeof piRef === "string" ? piRef : piRef?.id ?? null;
+      if (paymentIntentId) {
+        const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
+        chargeId = typeof pi.latest_charge === "string" ? pi.latest_charge : pi.latest_charge?.id ?? null;
+      }
     }
+  } catch {
+    console.warn(`[stripe-webhook] Could not resolve chargeId for invoice ${invoice.id} — QB receipt will be skipped`);
   }
 
   const amount = (invoice.amount_paid ?? 0) / 100;
 
   // Fetch subscription metadata to get the contracted total months (N).
-  const sub = await stripe.subscriptions.retrieve(subscriptionId);
-  const totalMonths = parseInt(sub.metadata?.months ?? "1", 10);
+  let totalMonths = 1;
+  try {
+    const sub = await stripe.subscriptions.retrieve(subscriptionId);
+    totalMonths = parseInt(sub.metadata?.months ?? "1", 10);
+  } catch {
+    console.warn(`[stripe-webhook] Could not retrieve subscription ${subscriptionId} metadata — using totalMonths=1`);
+  }
 
   if (invoice.billing_reason === "subscription_create") {
     // Payment + Session already created by checkout.session.completed.
@@ -195,8 +207,14 @@ async function handleInvoicePaymentSucceeded(event: Stripe.Event) {
 
     // Backfill stripeChargeId — it was null at checkout time (charge hadn't settled yet).
     // Do this before writeSalesReceiptSafe so the updateMany({ where: stripeChargeId }) finds the row.
-    if (!payment.stripeChargeId) {
-      await prisma.payment.update({ where: { id: payment.id }, data: { stripeChargeId: chargeId } });
+    if (!payment.stripeChargeId || (hostedInvoiceUrl && !payment.hostedInvoiceUrl)) {
+      await prisma.payment.update({
+        where: { id: payment.id },
+        data: {
+          ...(payment.stripeChargeId ? {} : { stripeChargeId: chargeId }),
+          ...(hostedInvoiceUrl && !payment.hostedInvoiceUrl ? { hostedInvoiceUrl } : {}),
+        },
+      });
     }
 
     const vt0 = vehicleTypeLabel(payment.session.vehicle.type);
@@ -252,6 +270,9 @@ async function handleInvoicePaymentSucceeded(event: Stripe.Event) {
         stripeChargeId: chargeId,
       });
     }
+    if (hostedInvoiceUrl && !existingRenewal.hostedInvoiceUrl) {
+      await prisma.payment.update({ where: { id: existingRenewal.id }, data: { hostedInvoiceUrl } });
+    }
     return;
   }
 
@@ -271,6 +292,7 @@ async function handleInvoicePaymentSucceeded(event: Stripe.Event) {
         stripeChargeId: chargeId,
         stripeSubscriptionId: subscriptionId,
         stripeInvoiceId: invoice.id,
+        hostedInvoiceUrl,
       },
     }),
   ]);
@@ -291,6 +313,7 @@ async function handleInvoicePaymentSucceeded(event: Stripe.Event) {
 async function handleInvoicePaymentFailed(event: Stripe.Event) {
   const invoice = event.data.object as Stripe.Invoice & {
     subscription?: string | Stripe.Subscription | null;
+    hosted_invoice_url?: string | null;
   };
   const subscriptionId = typeof invoice.subscription === "string"
     ? invoice.subscription
@@ -299,14 +322,28 @@ async function handleInvoicePaymentFailed(event: Stripe.Event) {
 
   const firstPayment = await prisma.payment.findFirst({
     where: { stripeSubscriptionId: subscriptionId },
+    orderBy: { createdAt: "asc" },
     include: { session: true },
   });
   if (!firstPayment) return;
 
+  const hostedInvoiceUrl = invoice.hosted_invoice_url ?? null;
+
   await prisma.session.update({
     where: { id: firstPayment.session.id },
-    data: { billingStatus: "PAYMENT_FAILED" },
+    data: { billingStatus: "PAYMENT_FAILED", billingFailedAt: new Date() },
   });
+
+  // Persist the invoice recovery link on the anchor payment so the
+  // Needs Review SUBSCRIPTION_PAYMENT_FAILED item can surface a direct
+  // "Open invoice" action. Updated on every failed-invoice event so it
+  // always reflects the latest failure.
+  if (hostedInvoiceUrl) {
+    await prisma.payment.update({
+      where: { id: firstPayment.id },
+      data: { hostedInvoiceUrl },
+    });
+  }
 
   await audit({
     action: "RECURRING_CHARGE_FAILED",
@@ -349,35 +386,142 @@ async function handleSubscriptionDeleted(event: Stripe.Event) {
 
   const firstPayment = await prisma.payment.findFirst({
     where: { stripeSubscriptionId: sub.id },
-    include: { session: true },
+    include: {
+      session: {
+        select: {
+          id: true,
+          driverId: true,
+          status: true,
+          billingCancelledByAdmin: true,
+          expectedEnd: true,
+        },
+      },
+    },
   });
   if (!firstPayment) return;
 
   const session = firstPayment.session;
-
-  // If the admin already cancelled this session in the DB (and Stripe is confirming
-  // the subscription is gone), treat as a no-op — billing status is already handled.
-  if (session.status === "CANCELLED") return;
-
   const now = new Date();
+  const classification = classifySubscriptionDeletion(sub, session, now);
 
-  // Clamp session end to now for immediate mid-period cancellations.
-  // For period-end cancellations, expectedEnd was already set correctly by the
-  // last invoice.payment_succeeded renewal webhook, so this is a no-op.
-  const newEnd = session.expectedEnd < now ? session.expectedEnd : now;
+  switch (classification.kind) {
+    case "already_ended":
+      // Session is CANCELLED or COMPLETED — no further mutation needed.
+      return;
 
-  await prisma.session.update({
-    where: { id: session.id },
-    data: {
-      billingStatus: "DELINQUENT",
-      ...(newEnd < session.expectedEnd ? { expectedEnd: newEnd } : {}),
-    },
-  });
+    case "admin_planned": {
+      if (!classification.accessEnded) {
+        // Custom access window still open — suppress any delinquency signal, leave ACTIVE.
+        return;
+      }
+      // Paid period has elapsed — close cleanly as COMPLETED (not CANCELLED, to avoid
+      // false-positive CANCELLED_SESSION_WITH_UNRECONCILED_CHARGE in reconcile).
+      const newEnd = session.expectedEnd < now ? session.expectedEnd : now;
+      await prisma.session.update({
+        where: { id: session.id },
+        data: {
+          status: "COMPLETED",
+          ...(newEnd < session.expectedEnd ? { expectedEnd: newEnd } : {}),
+        },
+      });
+      await audit({
+        action: "SUBSCRIPTION_CANCELED",
+        sessionId: session.id,
+        driverId: session.driverId,
+        details: `Subscription ${sub.id} canceled at period end — admin-planned (not delinquency). Paid period elapsed; session closed cleanly as COMPLETED.`,
+      });
+      return;
+    }
 
-  await audit({
-    action: "SUBSCRIPTION_CANCELED",
-    sessionId: session.id,
-    driverId: session.driverId,
-    details: `Subscription ${sub.id} canceled — access ends ${newEnd.toISOString()}. If driver is on property, cron will detect overstay on next run.`,
-  });
+    case "payment_failed": {
+      const newEnd = session.expectedEnd < now ? session.expectedEnd : now;
+      await prisma.session.update({
+        where: { id: session.id },
+        data: {
+          billingStatus: "DELINQUENT",
+          billingDelinquentAt: now,
+          ...(newEnd < session.expectedEnd ? { expectedEnd: newEnd } : {}),
+        },
+      });
+      await audit({
+        action: "SUBSCRIPTION_CANCELED",
+        sessionId: session.id,
+        driverId: session.driverId,
+        details: `Subscription ${sub.id} canceled due to payment failure (dunning exhausted). Access ends ${newEnd.toISOString()}. If driver is on property, cron will detect overstay.`,
+      });
+      return;
+    }
+
+    case "payment_disputed": {
+      // TODO: Add a dedicated DISPUTED billingStatus and SUBSCRIPTION_ENDED_OUTSIDE_APP
+      // Needs Review code for dispute-driven cancellations. For now DELINQUENT blocks gate.
+      const newEnd = session.expectedEnd < now ? session.expectedEnd : now;
+      await prisma.session.update({
+        where: { id: session.id },
+        data: {
+          billingStatus: "DELINQUENT",
+          billingDelinquentAt: now,
+          ...(newEnd < session.expectedEnd ? { expectedEnd: newEnd } : {}),
+        },
+      });
+      await audit({
+        action: "SUBSCRIPTION_CANCELED",
+        sessionId: session.id,
+        driverId: session.driverId,
+        details: `Subscription ${sub.id} canceled due to payment dispute — not ordinary dunning. Review the dispute in the Stripe dashboard. Access blocked pending resolution.`,
+      });
+      return;
+    }
+
+    case "planned_expiry": {
+      if (!classification.accessEnded) {
+        // cancel_at_period_end or cancellation_requested with future expectedEnd —
+        // the period hasn't elapsed yet; leave session ACTIVE.
+        return;
+      }
+      // Natural expiry (cancel_at = expectedEnd set at checkout, or cancellation_requested)
+      // with the access period now elapsed — close cleanly as COMPLETED.
+      const newEnd = session.expectedEnd < now ? session.expectedEnd : now;
+      await prisma.session.update({
+        where: { id: session.id },
+        data: {
+          status: "COMPLETED",
+          ...(newEnd < session.expectedEnd ? { expectedEnd: newEnd } : {}),
+        },
+      });
+      await audit({
+        action: "SUBSCRIPTION_CANCELED",
+        sessionId: session.id,
+        driverId: session.driverId,
+        details: `Subscription ${sub.id} ended at planned expiry (cancel_at / cancellation_requested). Session closed cleanly as COMPLETED.`,
+      });
+      return;
+    }
+
+    case "unknown": {
+      // TODO: Add SUBSCRIPTION_ENDED_OUTSIDE_APP Needs Review code.
+      // No clear payment failure signal — do not auto-DELINQUENT. If the period has elapsed,
+      // close as COMPLETED; otherwise leave ACTIVE and surface the anomaly via audit.
+      if (classification.accessEnded) {
+        const newEnd = session.expectedEnd < now ? session.expectedEnd : now;
+        await prisma.session.update({
+          where: { id: session.id },
+          data: {
+            status: "COMPLETED",
+            ...(newEnd < session.expectedEnd ? { expectedEnd: newEnd } : {}),
+          },
+        });
+      }
+      await audit({
+        action: "SUBSCRIPTION_CANCELED",
+        sessionId: session.id,
+        driverId: session.driverId,
+        // Stable prefix [SUB_DEL:UNKNOWN] — the needs-review feed queries on this prefix
+        // to surface the deletion for admin review. Do not change without updating
+        // src/app/api/admin/reconcile/needs-review/route.ts.
+        details: `[SUB_DEL:UNKNOWN] Subscription ${sub.id} ended with unknown reason — outside expected app flow. Manual review required. Session ${classification.accessEnded ? "closed as COMPLETED" : "left ACTIVE until expectedEnd"}.`,
+      });
+      return;
+    }
+  }
 }

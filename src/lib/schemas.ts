@@ -23,7 +23,11 @@ export const phoneSchema = z
   .string()
   .min(7, "phone too short")
   .max(30, "phone too long");
-export const nameSchema = z.string().trim().min(1, "required").max(120);
+export const nameSchema = z.string()
+  .trim()
+  .min(1, "required")
+  .max(120)
+  .regex(/^[\x20-\x7EÀ-ɏ]*$/, "Name contains unsupported characters");
 
 // ---------------------------------------------------------------------------
 // Driver
@@ -51,9 +55,15 @@ export const VehicleUpsertSchema = z
   .object({
     driverId: idSchema,
     type: VehicleTypeSchema,
-    unitNumber: z.string().trim().max(50).optional().nullable(),
-    licensePlate: z.string().trim().max(20).optional().nullable(),
-    nickname: z.string().trim().max(80).optional().nullable(),
+    unitNumber: z.string().trim().max(50)
+      .regex(/^[\x20-\x7EÀ-ɏ]*$/, "Unit number contains unsupported characters")
+      .optional().nullable(),
+    licensePlate: z.string().trim().max(20)
+      .regex(/^[\x20-\x7EÀ-ɏ]*$/, "License plate contains unsupported characters")
+      .optional().nullable(),
+    nickname: z.string().trim().max(80)
+      .regex(/^[\x20-\x7EÀ-ɏ]*$/, "Nickname contains unsupported characters")
+      .optional().nullable(),
   })
   .refine((d) => !!d.unitNumber || !!d.licensePlate, {
     message: "unitNumber or licensePlate required",
@@ -132,6 +142,12 @@ export const SettingsUpdateSchema = z.object({
   totalSpotsTruck: z.number().int().min(0).max(10000).optional(),
   managerEmail: z.string().email().max(200).optional().or(z.literal("")),
   managerPhone: phoneSchema.optional().or(z.literal("")),
+  failedPaymentPolicy: z.enum([
+    "on_subscription_deleted",
+    "immediate_on_payment_failed",
+    "after_grace_days",
+  ]).optional(),
+  failedPaymentGraceDays: z.number().int().min(1).max(365).optional(),
 });
 
 // ---------------------------------------------------------------------------

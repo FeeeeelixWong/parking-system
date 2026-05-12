@@ -158,7 +158,10 @@ model Session {
   expectedEnd        DateTime
   endedAt            DateTime?
   status             SessionStatus @default(ACTIVE)
-  billingStatus      BillingStatus @default(CURRENT)
+  billingStatus       BillingStatus @default(CURRENT)
+  billingFailedAt     DateTime?     // set when invoice.payment_failed fires
+  billingDelinquentAt     DateTime?     // set when subscription.deleted fires or grace period elapses
+  billingCancelledByAdmin Boolean       @default(false)
   cancellationDisposition CancellationDisposition @default(N_A)
   reminderSent       Boolean       @default(false)
   overstayAlertSent  Boolean       @default(false)
@@ -195,6 +198,7 @@ model Payment {
   stripeChargeId          String?           // ch_... — the actual charge record
   stripeSubscriptionId    String?           // sub_... — only for MONTHLY_RENEWAL rows
   stripeInvoiceId         String?           // in_... — subscription invoice that produced this charge
+  hostedInvoiceUrl        String?           // hosted_invoice_url from Stripe Invoice — for payment recovery links
 
   // ─── QuickBooks accounting mirror IDs ────────────────────────────────
   // Populated after the webhook successfully writes to QB. Used for
@@ -228,6 +232,7 @@ model PaymentRefund {
   stripeRefundId    String   @unique
   qbRefundReceiptId    String?
   qbRefundReceiptAmount Float?  // amount written to QB; compared to Stripe refund in reconcile
+  adminReason          String?
   createdAt            DateTime @default(now())
 
   @@index([paymentId])
@@ -263,6 +268,12 @@ model Settings {
   overstayRateTruck     Float   @default(25.0)
   gracePeriodMinutes    Int     @default(15)
   reminderMinutesBefore Int     @default(60)
+  // Subscription billing policy — controls when PAYMENT_FAILED becomes access-blocking.
+  // "on_subscription_deleted": only DELINQUENT blocks (default, current behavior).
+  // "immediate_on_payment_failed": block immediately on first invoice failure.
+  // "after_grace_days": block after failedPaymentGraceDays days of PAYMENT_FAILED.
+  failedPaymentPolicy    String  @default("on_subscription_deleted")
+  failedPaymentGraceDays Int     @default(7)
   totalSpotsBobtail     Int     @default(45)
   totalSpotsTruck       Int     @default(100)
   managerEmail          String  @default("")
