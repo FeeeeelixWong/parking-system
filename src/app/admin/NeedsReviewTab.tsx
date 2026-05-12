@@ -1,8 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import type { NeedsReviewItem, NeedsReviewResponse } from "@/types/domain";
 import { useToast } from "@/app/admin/ToastContext";
+import AdminExternalWriteStatus from "@/app/admin/AdminExternalWriteStatus";
+import type { ExternalWriteStep, ExternalWriteTone } from "@/app/admin/AdminExternalWriteStatus";
+import { qbLinks } from "@/app/admin/_shared";
 
 const BG = "#FAFAFA";
 const CARD_BG = "#FFFFFF";
@@ -21,6 +24,14 @@ const MONO: React.CSSProperties = { fontFamily: "ui-monospace, SFMono-Regular, M
 
 type SeverityFilter = "all" | "warning" | "critical";
 type WriteState = "idle" | "pending" | "success" | "error";
+
+type SyncReceiptWidgetState = {
+  itemId: string;
+  title: string;
+  summary: string;
+  tone: ExternalWriteTone;
+  steps: ExternalWriteStep[];
+};
 
 const LIMIT = 50;
 
@@ -226,6 +237,7 @@ export default function NeedsReviewTab({
   const [severityFilter, setSeverityFilter] = useState<SeverityFilter>("all");
   const [loading, setLoading] = useState(true);
   const [writeStates, setWriteStates] = useState<Record<string, WriteState>>({});
+  const [syncReceiptResult, setSyncReceiptResult] = useState<SyncReceiptWidgetState | null>(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -270,13 +282,62 @@ export default function NeedsReviewTab({
     setWriteStates((prev) => ({ ...prev, [item.id]: "pending" }));
     try {
       const res = await fetch(path, { method: "POST" });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(data.error ?? "Action failed");
-      }
+      const data: { ok?: boolean; error?: string; qbSalesReceiptId?: string; alreadySynced?: boolean } =
+        await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error ?? "Action failed");
+
       setWriteStates((prev) => ({ ...prev, [item.id]: "success" }));
-      addToast({ type: "success", message: item.code === "QB_RECEIPT_MISSING" ? "QB Sales Receipt synced" : "QB refund receipt synced" });
-      load();
+
+      if (item.code === "QB_RECEIPT_MISSING" && data.qbSalesReceiptId) {
+        const qbId = data.qbSalesReceiptId;
+        const steps: ExternalWriteStep[] = data.alreadySynced
+          ? [
+              {
+                key: "qb_sales_receipt",
+                label: "QuickBooks Sales Receipt",
+                status: "confirmed",
+                detail: "Already linked — no new write",
+                externalId: qbId,
+                href: qbLinks.salesReceipt(qbId),
+              },
+              {
+                key: "db_payment",
+                label: "Payment linked to receipt",
+                status: "confirmed",
+                externalId: item.related.paymentId,
+              },
+            ]
+          : [
+              { key: "stripe_read", label: "Stripe charge resolved", status: "confirmed" },
+              {
+                key: "qb_sales_receipt",
+                label: "QuickBooks Sales Receipt written",
+                status: "confirmed",
+                externalId: qbId,
+                href: qbLinks.salesReceipt(qbId),
+              },
+              {
+                key: "db_payment",
+                label: "Payment linked to receipt",
+                status: "confirmed",
+                externalId: item.related.paymentId,
+              },
+              { key: "audit", label: "Audit log written", status: "confirmed" },
+            ];
+
+        setSyncReceiptResult({
+          itemId: item.id,
+          title: "QuickBooks receipt synced",
+          summary: data.alreadySynced
+            ? "Receipt was already linked to this payment."
+            : "Sales Receipt written and payment linked.",
+          tone: "success",
+          steps,
+        });
+      } else {
+        addToast({ type: "success", message: item.code === "QB_REFUND_RECEIPT_MISSING" ? "QB refund receipt synced" : "QB receipt synced" });
+        load();
+      }
     } catch (err) {
       setWriteStates((prev) => ({ ...prev, [item.id]: "error" }));
       addToast({ type: "error", message: err instanceof Error ? err.message : "Action failed" });
@@ -359,13 +420,23 @@ export default function NeedsReviewTab({
       ) : (
         <div style={{ display: "grid", gap: 10 }}>
           {items.map((item) => (
-            <ReviewCard
-              key={item.id}
-              item={item}
-              mobile={mobile}
-              writeState={writeStates[item.id] ?? "idle"}
-              onRunAction={runAction}
-            />
+            <Fragment key={item.id}>
+              <ReviewCard
+                item={item}
+                mobile={mobile}
+                writeState={writeStates[item.id] ?? "idle"}
+                onRunAction={runAction}
+              />
+              {syncReceiptResult?.itemId === item.id && (
+                <AdminExternalWriteStatus
+                  title={syncReceiptResult.title}
+                  summary={syncReceiptResult.summary}
+                  tone={syncReceiptResult.tone}
+                  steps={syncReceiptResult.steps}
+                  onClose={() => { setSyncReceiptResult(null); load(); }}
+                />
+              )}
+            </Fragment>
           ))}
         </div>
       )}
