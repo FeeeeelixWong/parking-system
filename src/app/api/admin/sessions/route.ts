@@ -579,6 +579,7 @@ export const PUT = handler({ body: SessionEditBody }, async ({ body }) => {
         effectiveEnd: effectiveEnd.toISOString(),
         refund: { amount: resolvedRefund, breakdown: refundsIssued },
         renewalAction,
+        ...(subAlreadyCancelled ? { idempotent: true } : {}),
       });
     }
 
@@ -1010,6 +1011,7 @@ export const PUT = handler({ body: SessionEditBody }, async ({ body }) => {
       access: mode,
       refund: { amount: resolvedRefund, breakdown: refundsIssued },
       cancellationDisposition,
+      ...(subAlreadyCancelled ? { idempotent: true } : {}),
     });
   }
 
