@@ -1273,3 +1273,37 @@ export async function findSessionsByDriverPhone(phone: string) {
   );
   return result.rows;
 }
+
+/**
+ * Seed a PaymentRefund row without a QB Refund Receipt ID.
+ * Triggers QB_REFUND_RECEIPT_MISSING in the Needs Review route.
+ * Also stamps refundedAmount + status = 'REFUNDED' on the parent Payment row.
+ */
+export async function seedPaymentRefundWithoutQb(args: {
+  paymentId: string;
+  amount: number;
+  stripeRefundId?: string;
+}) {
+  const client = db();
+  const refundId = randomUUID();
+  const stripeRefundId = args.stripeRefundId ?? `re_test_${refundId.slice(0, 8)}`;
+
+  const refund = await client.query<{
+    id: string;
+    paymentId: string;
+    amount: number;
+    stripeRefundId: string;
+  }>(
+    `INSERT INTO "PaymentRefund" (id, "paymentId", amount, "stripeRefundId", "createdAt")
+     VALUES ($1, $2, $3, $4, NOW())
+     RETURNING id, "paymentId", amount, "stripeRefundId"`,
+    [refundId, args.paymentId, args.amount, stripeRefundId],
+  );
+
+  await client.query(
+    `UPDATE "Payment" SET "refundedAmount" = $1, status = 'REFUNDED' WHERE id = $2`,
+    [args.amount, args.paymentId],
+  );
+
+  return refund.rows[0];
+}

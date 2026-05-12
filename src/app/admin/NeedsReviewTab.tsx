@@ -25,7 +25,7 @@ const MONO: React.CSSProperties = { fontFamily: "ui-monospace, SFMono-Regular, M
 type SeverityFilter = "all" | "warning" | "critical";
 type WriteState = "idle" | "pending" | "success" | "error";
 
-type SyncReceiptWidgetState = {
+type WriteWidgetState = {
   itemId: string;
   title: string;
   summary: string;
@@ -237,7 +237,7 @@ export default function NeedsReviewTab({
   const [severityFilter, setSeverityFilter] = useState<SeverityFilter>("all");
   const [loading, setLoading] = useState(true);
   const [writeStates, setWriteStates] = useState<Record<string, WriteState>>({});
-  const [syncReceiptResult, setSyncReceiptResult] = useState<SyncReceiptWidgetState | null>(null);
+  const [writeWidgetResult, setWriteWidgetResult] = useState<WriteWidgetState | null>(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -282,8 +282,16 @@ export default function NeedsReviewTab({
     setWriteStates((prev) => ({ ...prev, [item.id]: "pending" }));
     try {
       const res = await fetch(path, { method: "POST" });
-      const data: { ok?: boolean; error?: string; qbSalesReceiptId?: string; alreadySynced?: boolean } =
-        await res.json().catch(() => ({}));
+      const data: {
+        ok?: boolean;
+        error?: string;
+        // sync-receipt
+        qbSalesReceiptId?: string;
+        alreadySynced?: boolean;
+        // sync-refunds
+        refundedAmount?: number | null;
+        status?: string | null;
+      } = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error ?? "Action failed");
 
       setWriteStates((prev) => ({ ...prev, [item.id]: "success" }));
@@ -325,7 +333,7 @@ export default function NeedsReviewTab({
               { key: "audit", label: "Audit log written", status: "confirmed" },
             ];
 
-        setSyncReceiptResult({
+        setWriteWidgetResult({
           itemId: item.id,
           title: "QuickBooks receipt synced",
           summary: data.alreadySynced
@@ -334,8 +342,45 @@ export default function NeedsReviewTab({
           tone: "success",
           steps,
         });
+      } else if (item.code === "QB_REFUND_RECEIPT_MISSING") {
+        const { refundedAmount, status } = data;
+        const amountStr = refundedAmount != null ? `$${Number(refundedAmount).toFixed(2)}` : null;
+        const statusStr = status ?? null;
+        const dbDetail = [amountStr && `Refunded: ${amountStr}`, statusStr && `Status: ${statusStr}`]
+          .filter(Boolean).join(" · ") || undefined;
+
+        const steps: ExternalWriteStep[] = [
+          { key: "stripe_read", label: "Stripe charge checked", status: "confirmed" },
+          {
+            key: "db_payment",
+            label: "DB refund state updated",
+            status: "confirmed",
+            detail: dbDetail,
+            externalId: item.related.paymentId,
+          },
+          {
+            key: "qb_refund_receipt",
+            label: "QuickBooks refund receipt",
+            status: "warning",
+            detail: "Not confirmed — sync did not prove QB receipt",
+          },
+          {
+            key: "needs_review",
+            label: "Needs Review follow-up",
+            status: "warning",
+            detail: "Item stays visible until QuickBooks confirms the refund receipt",
+          },
+        ];
+
+        setWriteWidgetResult({
+          itemId: item.id,
+          title: "Refund sync checked",
+          summary: "Stripe checked and DB updated. QB refund receipt not yet confirmed.",
+          tone: "warning",
+          steps,
+        });
       } else {
-        addToast({ type: "success", message: item.code === "QB_REFUND_RECEIPT_MISSING" ? "QB refund receipt synced" : "QB receipt synced" });
+        addToast({ type: "success", message: "Action completed" });
         load();
       }
     } catch (err) {
@@ -427,13 +472,13 @@ export default function NeedsReviewTab({
                 writeState={writeStates[item.id] ?? "idle"}
                 onRunAction={runAction}
               />
-              {syncReceiptResult?.itemId === item.id && (
+              {writeWidgetResult?.itemId === item.id && (
                 <AdminExternalWriteStatus
-                  title={syncReceiptResult.title}
-                  summary={syncReceiptResult.summary}
-                  tone={syncReceiptResult.tone}
-                  steps={syncReceiptResult.steps}
-                  onClose={() => { setSyncReceiptResult(null); load(); }}
+                  title={writeWidgetResult.title}
+                  summary={writeWidgetResult.summary}
+                  tone={writeWidgetResult.tone}
+                  steps={writeWidgetResult.steps}
+                  onClose={() => { setWriteWidgetResult(null); load(); }}
                 />
               )}
             </Fragment>
