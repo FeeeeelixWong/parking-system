@@ -450,8 +450,13 @@ export const PUT = handler({ body: SessionEditBody }, async ({ body }) => {
 
           const newRefundedAmt  = Math.round((actualRefundedSoFar(p) + toRefund) * 100) / 100;
           const fullyRefunded   = newRefundedAmt >= p.amount - 0.005;
+          // upsert prevents P2002 on retry: Stripe idempotency returns the same refund.id.
           await prisma.$transaction([
-            prisma.paymentRefund.create({ data: { paymentId: p.id, stripeRefundId: refund.id, amount: toRefund } }),
+            prisma.paymentRefund.upsert({
+              where: { stripeRefundId: refund.id },
+              create: { paymentId: p.id, stripeRefundId: refund.id, amount: toRefund },
+              update: {},
+            }),
             prisma.payment.update({
               where: { id: p.id },
               data: { refundedAmount: newRefundedAmt, refundedAt: new Date(), status: fullyRefunded ? "REFUNDED" : "PARTIALLY_REFUNDED" },
@@ -770,11 +775,13 @@ export const PUT = handler({ body: SessionEditBody }, async ({ body }) => {
 
     // ── Step 1: refund (if any) ──────────────────────────────────────────────
     const refundsIssued: string[] = [];
+    const refundedPaymentIds = new Set<string>();
     if (resolvedRefund > 0.005) {
       let remaining = resolvedRefund;
       for (const p of refundablePayments) {
         if (remaining <= 0.005) break;
-        const maxRefundable = Math.round((p.amount - p.refundedAmount) * 100) / 100;
+        const alreadyRefunded = p.refunds.reduce((s, r) => s + r.amount, 0);
+        const maxRefundable = Math.round((p.amount - alreadyRefunded) * 100) / 100;
         if (maxRefundable <= 0.005) continue;
         const toRefund = Math.min(maxRefundable, remaining);
         const cents = Math.round(toRefund * 100);
@@ -787,15 +794,15 @@ export const PUT = handler({ body: SessionEditBody }, async ({ body }) => {
           // preventing a duplicate charge if the DB write fails and the admin retries.
           idempotencyKey: `admin_cancel_monthly_${sessionId}_${p.id}_${cents}`,
         });
-        const newRefundedAmount = Math.round((p.refundedAmount + toRefund) * 100) / 100;
+        const newRefundedAmount = Math.round((alreadyRefunded + toRefund) * 100) / 100;
         const fullyRefunded = newRefundedAmount >= p.amount - 0.005;
+        // upsert prevents P2002 on retry: Stripe idempotency returns the same refund.id,
+        // but if the prior $transaction failed the row doesn't exist yet.
         await prisma.$transaction([
-          prisma.paymentRefund.create({
-            data: {
-              paymentId: p.id,
-              stripeRefundId: refund.id,
-              amount: toRefund,
-            },
+          prisma.paymentRefund.upsert({
+            where: { stripeRefundId: refund.id },
+            create: { paymentId: p.id, stripeRefundId: refund.id, amount: toRefund },
+            update: {},
           }),
           prisma.payment.update({
             where: { id: p.id },
@@ -806,6 +813,7 @@ export const PUT = handler({ body: SessionEditBody }, async ({ body }) => {
             },
           }),
         ]);
+        refundedPaymentIds.add(p.id);
         refundsIssued.push(toRefund.toFixed(2));
         remaining = Math.round((remaining - toRefund) * 100) / 100;
       }
@@ -819,8 +827,11 @@ export const PUT = handler({ body: SessionEditBody }, async ({ body }) => {
         details: `Refund $${resolvedRefund.toFixed(2)} issued for monthly cancellation. Reason: ${body.reason}`,
       });
 
-      // Best-effort: sync QB Refund Receipts without waiting for webhook.
+      // Best-effort: sync QB Refund Receipts for payments actually refunded in this call.
+      // Scoping to refundedPaymentIds prevents misleading $0 REFUND_ISSUED audit entries
+      // for prior-period payments that processChargeRefund would emit even with 0 refunds.
       for (const p of refundablePayments) {
+        if (!refundedPaymentIds.has(p.id)) continue;
         if (!p.stripePaymentIntentId) continue;
         try {
           const stripeSync = getStripe();
@@ -929,7 +940,16 @@ export const PUT = handler({ body: SessionEditBody }, async ({ body }) => {
         await prisma.session.update({
           where: { id: sessionId },
           data: { billingCancelledByAdmin: false },
-        }).catch(() => {});
+        }).catch((rollbackErr: unknown) => {
+          // Rollback failure leaves billingCancelledByAdmin=true on a live subscription,
+          // causing future payment-failure events to be misclassified as admin-planned.
+          // Manual fix: UPDATE "Session" SET "billingCancelledByAdmin"=false WHERE id='<sessionId>'.
+          console.error(
+            `[admin/sessions] CRITICAL: billingCancelledByAdmin rollback failed for session ${sessionId}. ` +
+            `Manual remediation required.`,
+            rollbackErr,
+          );
+        });
       }
       const msg = e instanceof Error ? e.message : "Unknown failure";
       return json(
@@ -963,21 +983,25 @@ export const PUT = handler({ body: SessionEditBody }, async ({ body }) => {
       `ADMIN cancelled monthly session. Stripe: ${stripeLabel}. ` +
       `Access: ends ${accessLabel}. Refund: ${refundLabel}. Reason: ${body.reason}`;
 
-    await audit({
-      action: "SUBSCRIPTION_CANCELED",
-      sessionId,
-      driverId: session.driverId,
-      details: auditDetails,
-    });
-    if (mode !== "period_end") {
+    try {
       await audit({
-        action: "SPOT_FREED",
+        action: "SUBSCRIPTION_CANCELED",
         sessionId,
         driverId: session.driverId,
-        vehicleId: session.vehicleId,
-        spotId: session.spotId,
         details: auditDetails,
       });
+      if (mode !== "period_end") {
+        await audit({
+          action: "SPOT_FREED",
+          sessionId,
+          driverId: session.driverId,
+          vehicleId: session.vehicleId,
+          spotId: session.spotId,
+          details: auditDetails,
+        });
+      }
+    } catch (auditErr) {
+      console.error("[admin/sessions] terminal audit write failed (cancel-monthly-session):", auditErr);
     }
 
     return json({
