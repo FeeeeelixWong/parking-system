@@ -135,7 +135,8 @@ export const GET = handler({}, async ({ req }) => {
   }
 
   const settings = await getSettings();
-  const graceThreshold = new Date(Date.now() - settings.gracePeriodMinutes * 60 * 1000);
+  const now = new Date();
+  const graceThreshold = new Date(now.getTime() - settings.gracePeriodMinutes * 60 * 1000);
 
   // Unknown-reason subscription deletions — surfaced via the [SUB_DEL:UNKNOWN] audit
   // prefix written by the stripe webhook handler. These are deletions Stripe fired with
@@ -272,6 +273,35 @@ export const GET = handler({}, async ({ req }) => {
         rel(),
         expectedEnd.toISOString(),
       ));
+    }
+
+    // Detect subscription cancellation / DB access drift:
+    // billingCancelledByAdmin=true means admin initiated a Stripe cancel. If the
+    // session is still ACTIVE and has a monthly subscription, check whether the
+    // access window has already passed (critical) or is still pending (warning).
+    if (status === "ACTIVE" && session.billingCancelledByAdmin && isMonthly &&
+      session.payments.some((p) => p.stripeSubscriptionId != null)) {
+      if (expectedEnd < now) {
+        allItems.push(makeItem(
+          "SUBSCRIPTION_CANCELLED_BUT_ACCESS_ACTIVE",
+          "Cancelled subscription still has active access",
+          `Stripe cancellation was initiated, but the parking session is still active past its access end.`,
+          "Review the session and end access or correct the paid-through date.",
+          "Review session",
+          rel(),
+          expectedEnd.toISOString(),
+        ));
+      } else {
+        allItems.push(makeItem(
+          "SUBSCRIPTION_CANCELLED_ACCESS_STILL_VALID",
+          "Subscription cancelled, access expires soon",
+          `${driverName}'s subscription was cancelled by admin. Access remains until ${fmtDate(expectedEnd)}.`,
+          "No action required unless the driver should be removed early.",
+          "Review session",
+          rel(),
+          expectedEnd.toISOString(),
+        ));
+      }
     }
 
     // ── Per-payment checks ──────────────────────────────────────────────────
