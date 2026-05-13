@@ -50,3 +50,6 @@ next-env.d.ts
 
 /src/generated/prisma
 .env*.local
+
+# demo scenario manifests (local only — not committed)
+.demo-manifests/
