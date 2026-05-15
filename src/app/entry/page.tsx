@@ -7,6 +7,7 @@ import Link from "next/link";
 import type { SavedDriver } from "@/types/domain";
 import type { ActionState } from "@/types/domain";
 import { loadDriver, saveDriver, clearDriver, getDeviceId } from "@/lib/driver-store";
+import { isExternalNavigation } from "@/lib/navigation";
 import { apiFetch, apiPost } from "@/lib/fetch";
 import { timeRemaining, timeOverdue, vehicleLabel } from "@/lib/time";
 import PhoneInput from "@/components/PhoneInput";
@@ -50,18 +51,7 @@ type DriverStateResponse = {
   allowedActions: ActionState[];
 };
 
-/** Detect if page load is a fresh QR scan (not refresh, back button, or shared link). */
-function isExternalNavigation(): boolean {
-  if (typeof window === "undefined") return false;
-  const nav = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
-  if (!nav || nav.type !== "navigate") return false;
-  try {
-    if (document.referrer && new URL(document.referrer).origin === window.location.origin) {
-      return false;
-    }
-  } catch { /* invalid referrer URL — treat as external */ }
-  return true;
-}
+
 
 // ---------------------------------------------------------------------------
 // Page

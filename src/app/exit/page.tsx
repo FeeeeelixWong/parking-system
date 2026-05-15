@@ -1,11 +1,12 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 
 import type { OverstayInfo, ActionState } from "@/types/domain";
 import { loadDriver, saveDriver, clearDriver, getDeviceId } from "@/lib/driver-store";
+import { isExternalNavigation } from "@/lib/navigation";
 import { apiFetch, apiPost } from "@/lib/fetch";
 import PhoneInput from "@/components/PhoneInput";
 
@@ -50,6 +51,8 @@ type State =
   | "enter_phone"
   | "confirm"
   | "not_registered"
+  | "gate_active"     // auto-fire pending: checked via freshScan before firing
+  | "gate_allowlist"  // allow-list auto-fire pending: checked via freshScan
   | "gate_opening"
   | "gate_opened"
   | "exited";
@@ -90,6 +93,15 @@ function ExitContent() {
   const [error, setError] = useState("");
   const [actionLoading, setActionLoading] = useState(false);
 
+  // Fresh-scan detection — mirrors /entry to prevent reload/back-button gate fires
+  const freshScan = useRef(false);
+  const phoneDigitsRef = useRef(""); // phone for allow-list gate (captured in resolveState)
+  const [gateTriggered, setGateTriggered] = useState(false);
+  const [gateDenied, setGateDenied] = useState(false);
+
+  /* capture nav type before any gate effect fires */
+  useEffect(() => { freshScan.current = isExternalNavigation(); }, []);
+
   /* fetch settings for manager phone */
   useEffect(() => {
     apiFetch<{ settings: { managerPhone?: string } }>("/api/settings")
@@ -100,18 +112,10 @@ function ExitContent() {
   }, []);
 
   /* resolve driver state → UI state */
-  async function resolveState(digits: string, data: DriverStateResponse) {
+  function resolveState(digits: string, data: DriverStateResponse) {
     if (data.allowList.allowed) {
-      setState("gate_opening");
-      try {
-        await apiPost("/api/allowlist/open-gate", {
-          phone: digits,
-          deviceId: getDeviceId(),
-          direction: "EXIT",
-          scanContext: "fresh",
-        });
-      } catch { /* show gate_opened even if gate call fails */ }
-      setState("gate_opened");
+      phoneDigitsRef.current = digits;
+      setState("gate_allowlist");
       return;
     }
 
@@ -133,26 +137,7 @@ function ExitContent() {
     setSession(s);
 
     if (s.status === "ACTIVE") {
-      setState("gate_opening");
-      try {
-        const result = await apiPost<
-          | { ok: true; result: { openedAt: string } }
-          | { ok: false; denial: { message: string } }
-        >(`/api/sessions/${s.id}/open-gate`, {
-          driverId: d.id,
-          deviceId: getDeviceId(),
-          direction: "EXIT",
-          scanContext: "fresh",
-        });
-        if (!result.ok) {
-          setError(result.denial.message);
-          setState("has_session");
-        } else {
-          setState("gate_opened");
-        }
-      } catch {
-        setState("gate_opened"); // show info even if gate call fails
-      }
+      setState("gate_active");
       return;
     }
 
@@ -168,6 +153,56 @@ function ExitContent() {
     }
     setState("overstayed");
   }
+
+  /* auto-fire gate for ACTIVE session — gated on fresh external navigation */
+  useEffect(() => {
+    if (state !== "gate_active" || gateTriggered) return;
+    if (!session || !driver) return;
+    if (!freshScan.current) {
+      setGateDenied(true);
+      return;
+    }
+    setGateTriggered(true);
+    setState("gate_opening");
+    apiPost<
+      | { ok: true; result: { openedAt: string } }
+      | { ok: false; denial: { message: string } }
+    >(`/api/sessions/${session.id}/open-gate`, {
+      driverId: driver.id,
+      deviceId: getDeviceId(),
+      direction: "EXIT",
+      scanContext: "fresh",
+    })
+      .then((result) => {
+        if (!result.ok) {
+          setError(result.denial.message);
+          setState("has_session");
+        } else {
+          setState("gate_opened");
+        }
+      })
+      .catch(() => { setState("gate_opened"); });
+  }, [state, gateTriggered, session, driver]);
+
+  /* auto-fire gate for allow-list — gated on fresh external navigation */
+  useEffect(() => {
+    if (state !== "gate_allowlist" || gateTriggered) return;
+    if (!freshScan.current) {
+      setGateDenied(true);
+      return;
+    }
+    const digits = phoneDigitsRef.current;
+    setGateTriggered(true);
+    setState("gate_opening");
+    apiPost("/api/allowlist/open-gate", {
+      phone: digits,
+      deviceId: getDeviceId(),
+      direction: "EXIT",
+      scanContext: "fresh",
+    })
+      .then(() => { setState("gate_opened"); })
+      .catch(() => { setState("gate_opened"); });
+  }, [state, gateTriggered]);
 
   /* on mount: check localStorage */
   useEffect(() => {
@@ -208,7 +243,7 @@ function ExitContent() {
     setActionLoading(true);
     try {
       const data = await apiFetch<DriverStateResponse>(`/api/driver/state?phone=${digits}`);
-      await resolveState(digits, data);
+      resolveState(digits, data);
     } catch {
       setError("Could not look up your number. Try again.");
     } finally {
@@ -275,6 +310,8 @@ function ExitContent() {
     <Shell>
       {state === "init" || state === "checking" ? (
         <CheckingView />
+      ) : (state === "gate_active" || state === "gate_allowlist") && gateDenied ? (
+        <RescanRequiredView driver={driver} />
       ) : state === "gate_opening" ? (
         <GateOpeningView />
       ) : state === "gate_opened" && driver && session ? (
@@ -392,6 +429,28 @@ function GateOpenedView({
       </div>
 
       <p style={styles.hint}>Scan the entry QR code to re-enter.</p>
+    </div>
+  );
+}
+
+function RescanRequiredView({ driver }: { driver: ExitDriver | null }) {
+  return (
+    <div>
+      {driver && (
+        <div style={styles.welcomeBar}>
+          <div>
+            <p style={styles.eyebrow}>Welcome back</p>
+            <p style={styles.welcomeName}>{driver.name}</p>
+          </div>
+        </div>
+      )}
+      <div style={styles.center}>
+        <div style={{ ...styles.gateIcon, background: "rgba(255,180,0,0.08)", border: "1px solid rgba(255,180,0,0.2)", color: "#e0a020" }}>
+          ↻
+        </div>
+        <p style={{ ...styles.eyebrow, color: "#e0a020", marginBottom: 8 }}>Re-scan required</p>
+        <p style={styles.hint}>Please re-scan the QR code at the gate to open it.</p>
+      </div>
     </div>
   );
 }

@@ -20,7 +20,7 @@ import {
   type DemoManifest,
   type ScenarioEntry,
 } from "./manifest.js";
-import { makeTestRunId, disconnectPrisma } from "./prisma-client.js";
+import { makeTestRunId, disconnectPrisma, getPrisma } from "./prisma-client.js";
 
 const SINGLE_SCENARIOS = [
   "healthy-daily",
@@ -79,25 +79,54 @@ async function runReset(testRunId: string): Promise<void> {
   await resetScenario(testRunId);
 }
 
-function runList(): void {
+const DEMO_ID_RE_CLI = /demo_[a-z0-9-]+_\d{8}_\d{6}_[a-z0-9]{4}/i;
+
+async function runList(): Promise<void> {
   const manifests = listManifests();
   if (manifests.length === 0) {
     console.log("No demo manifests found. Run npm run demo:create -- <scenario> to create one.");
-    return;
+  } else {
+    console.log();
+    for (const m of manifests) {
+      const ts = m.createdAt.slice(0, 19).replace("T", " ");
+      console.log(`${m.testRunId}`);
+      console.log(`  stateName: ${m.stateName}   created: ${ts}`);
+      for (const s of m.scenarios) {
+        const codes = s.expectedNeedsReviewCodes.length
+          ? `[${s.expectedNeedsReviewCodes.join(", ")}]`
+          : "(clean)";
+        console.log(`  · ${s.scenario.padEnd(28)} ${codes}`);
+      }
+      console.log();
+    }
   }
 
-  console.log();
-  for (const m of manifests) {
-    const ts = m.createdAt.slice(0, 19).replace("T", " ");
-    console.log(`${m.testRunId}`);
-    console.log(`  stateName: ${m.stateName}   created: ${ts}`);
-    for (const s of m.scenarios) {
-      const codes = s.expectedNeedsReviewCodes.length
-        ? `[${s.expectedNeedsReviewCodes.join(", ")}]`
-        : "(clean)";
-      console.log(`  · ${s.scenario.padEnd(28)} ${codes}`);
+  // Orphan detection: DB drivers whose email embeds a testRunId not in any manifest.
+  const dbUrl = process.env.DEMO_DATABASE_URL ?? process.env.TEST_DATABASE_URL;
+  if (!dbUrl) return;
+  if (!process.env.DATABASE_URL) process.env.DATABASE_URL = dbUrl;
+
+  try {
+    const prisma = await getPrisma();
+    const demoDrivers = await prisma.driver.findMany({
+      where: { email: { contains: "@demo.test" } },
+      select: { email: true },
+    });
+
+    const knownIds = new Set(manifests.map((m) => m.testRunId));
+    const orphaned = new Set<string>();
+    for (const d of demoDrivers) {
+      const match = d.email?.match(DEMO_ID_RE_CLI);
+      if (match && !knownIds.has(match[0])) orphaned.add(match[0]);
     }
-    console.log();
+
+    if (orphaned.size > 0) {
+      console.warn("⚠ Orphaned demo DB rows found (no manifest). Run demo:reset or clean manually:");
+      for (const id of orphaned) console.warn(`  ${id}`);
+      console.warn();
+    }
+  } catch {
+    // DB unavailable — skip orphan check silently
   }
 }
 
@@ -120,7 +149,7 @@ async function main(): Promise<void> {
       }
       await runReset(arg);
     } else if (command === "list") {
-      runList();
+      await runList();
     } else {
       console.error(
         "Unknown command. Use: create | reset | list\n" +

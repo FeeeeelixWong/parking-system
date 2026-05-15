@@ -176,7 +176,17 @@ export default function AdminDashboard() {
   const [paymentsInitialSearch, setPaymentsInitialSearch] = useState("");
   const [reconcileHasIssues, setReconcileHasIssues] = useState(false);
 
-  // Read ?tab and ?q URL params on mount so deep-links (e.g. "View in Payments") work
+  const DEMO_ID_RE = /^demo_[a-z0-9-]+_\d{8}_\d{6}_[a-z0-9]{4}$/i;
+
+  // Initialize demoId synchronously from URL so it's available before the badge check runs.
+  const [demoId, setDemoId] = useState<string | undefined>(() => {
+    if (typeof window === "undefined") return undefined;
+    const raw = new URLSearchParams(window.location.search).get("demoId");
+    return raw && DEMO_ID_RE.test(raw) ? raw : undefined;
+  });
+
+  // Read ?tab and ?q URL params on mount so deep-links (e.g. "View in Payments") work.
+  // demoId is already initialized above; just strip it from the URL here.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const t = params.get("tab");
@@ -186,15 +196,18 @@ export default function AdminDashboard() {
     }
     const q = params.get("q");
     if (q) setPaymentsInitialSearch(q);
-    if (t || q) window.history.replaceState({}, "", window.location.pathname);
+    if (t || q || params.has("demoId")) window.history.replaceState({}, "", window.location.pathname);
   }, []);
 
+  // Reconcile badge — re-evaluates when demoId changes so the dot reflects the current scope.
   useEffect(() => {
-    fetch("/api/admin/reconcile/needs-review?limit=1")
+    const p = new URLSearchParams({ limit: "1" });
+    if (demoId) p.set("demoId", demoId);
+    fetch(`/api/admin/reconcile/needs-review?${p}`)
       .then((r) => r.json())
       .then((d) => setReconcileHasIssues((d.total ?? 0) > 0))
       .catch(() => {});
-  }, []);
+  }, [demoId]);
 
   useEffect(() => {
     document.body.style.background = DARK_BG;
@@ -294,8 +307,9 @@ export default function AdminDashboard() {
     p.set("offset", String(sessOffset));
     if (sessSearch.trim()) p.set("q", sessSearch.trim());
     if (sessStatus) p.set("status", sessStatus);
+    if (demoId) p.set("demoId", demoId);
     return p.toString();
-  }, [sessSearch, sessStatus, sessOffset]);
+  }, [sessSearch, sessStatus, sessOffset, demoId]);
 
   const skipSessionSync = useRef(false);
 
@@ -371,7 +385,7 @@ export default function AdminDashboard() {
   }, [tab, logFilter, logOffset, loadLog]);
 
   // Reset offset when filters change
-  useEffect(() => { setSessOffset(0); }, [sessSearch, sessStatus]);
+  useEffect(() => { setSessOffset(0); }, [sessSearch, sessStatus, demoId]);
   useEffect(() => { setDriversOffset(0); }, [driversSearch]);
 
   // ── Derived state ──
@@ -591,6 +605,26 @@ export default function AdminDashboard() {
         </div>
       </div>
 
+      {/* ═══ DEMO FILTER BANNER ═══ */}
+      {demoId && (
+        <div style={{
+          display: "flex", alignItems: "center", gap: 10, flexShrink: 0,
+          margin: mobile ? "0 16px 8px" : "0 24px 8px",
+          padding: "8px 14px", borderRadius: 8,
+          background: "#1A3A2A", border: "1px solid #2D7A4A",
+          fontSize: 12, color: "#7ED4A4", flexWrap: "wrap",
+        }}>
+          <span style={{ fontWeight: 700, color: "#2D7A4A" }}>Demo</span>
+          <span style={{ fontFamily: "monospace", color: "#A0C4B0", wordBreak: "break-all" }}>{demoId}</span>
+          <button
+            onClick={() => setDemoId(undefined)}
+            style={{ marginLeft: "auto", padding: "3px 10px", borderRadius: 5, border: "1px solid #2D7A4A", background: "transparent", color: "#7ED4A4", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+          >
+            Clear filter
+          </button>
+        </div>
+      )}
+
       <div style={{ flex: 1, display: "flex", flexDirection: "column", padding: tab === "reconcile" ? 0 : mobile ? "16px 16px 32px" : "24px 24px 40px" }}>
 
         {/* ═══ OVERVIEW (Lot Map) ═══ */}
@@ -681,7 +715,7 @@ export default function AdminDashboard() {
             {sessionsLoading ? (
               <p style={{ color: FG_DIM, textAlign: "center", padding: 40 }}>Loading…</p>
             ) : !sessionsData || sessionsData.sessions.length === 0 ? (
-              <p style={{ color: FG_DIM, textAlign: "center", padding: 40 }}>No sessions found.</p>
+              <p style={{ color: FG_DIM, textAlign: "center", padding: 40 }}>{demoId ? "No sessions found for this demo." : "No sessions found."}</p>
             ) : (
               <>
                 {/* Count */}
@@ -931,8 +965,8 @@ export default function AdminDashboard() {
         )}
 
         {/* ═══ PAYMENTS ═══ */}
-        {tab === "payments" && <PaymentsTab mobile={mobile} initialSearch={paymentsInitialSearch} />}
-        {tab === "reconcile" && <ReconcileView mobile={mobile} />}
+        {tab === "payments" && <PaymentsTab mobile={mobile} initialSearch={paymentsInitialSearch} demoId={demoId} />}
+        {tab === "reconcile" && <ReconcileView mobile={mobile} demoId={demoId} />}
 
         {/* ═══ DRIVERS ═══ */}
         {tab === "drivers" && (

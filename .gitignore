@@ -39,7 +39,16 @@ yarn-error.log*
 
 # claude code
 CLAUDE.md
-.claude/
+.claude/*
+!.claude/launch.json
+!.claude/settings.json
+!.claude/hooks/
+!.claude/hooks/*.sh
+!.claude/commands/
+!.claude/commands/*.md
+!.claude/agents/
+!.claude/agents/*.md
+.claude/settings.local.json
 
 # vercel
 .vercel

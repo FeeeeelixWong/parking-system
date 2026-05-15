@@ -40,7 +40,7 @@ export function vehicleTypeLabel(type: string | undefined): string {
 }
 
 export function plateSuffix(plate: string | undefined): string {
-  return plate ? ` · Plate ${plate}` : "";
+  return plate ? ` - Plate ${plate}` : "";
 }
 
 export async function writeSalesReceiptSafe(args: {
@@ -113,13 +113,13 @@ function salesReceiptDescription(purpose: SessionPurpose, metadata: CheckoutMeta
   const plate = plateSuffix(metadata.licensePlate);
   switch (purpose) {
     case "CHECKIN":
-      return `${vt} parking — check-in, ${metadata.days ?? "?"}d${plate}`;
+      return `${vt} parking - check-in, ${metadata.days ?? "?"}d${plate}`;
     case "MONTHLY_CHECKIN":
-      return `${vt} parking — monthly, month 1 of ${metadata.months ?? "?"}${plate}`;
+      return `${vt} parking - monthly, month 1 of ${metadata.months ?? "?"}${plate}`;
     case "EXTENSION":
-      return `${vt} parking — extension, ${metadata.days ?? "?"}d${plate}`;
+      return `${vt} parking - extension, ${metadata.days ?? "?"}d${plate}`;
     case "OVERSTAY":
-      return `${vt} parking — overstay, ${metadata.days ?? "?"}d${plate}`;
+      return `${vt} parking - overstay, ${metadata.days ?? "?"}d${plate}`;
   }
 }
 
@@ -612,7 +612,7 @@ export function refundDescription(payment: {
     MONTHLY_RENEWAL: "monthly renewal",
   };
   const detail = typeMap[payment.type] ?? payment.type.toLowerCase();
-  return `Refund — ${vt} parking, ${detail}${plate}`;
+  return `Refund - ${vt} parking, ${detail}${plate}`;
 }
 
 /**

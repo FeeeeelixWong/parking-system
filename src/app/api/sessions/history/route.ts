@@ -33,6 +33,7 @@ export const GET = handler(
       q,
       limit,
       offset,
+      demoId,
     } = query;
 
     const where: Prisma.SessionWhereInput = {
@@ -85,6 +86,7 @@ export const GET = handler(
             ],
           }
         : {}),
+      ...(demoId ? { driver: { email: { contains: demoId } } } : {}),
     };
 
     const [sessions, total] = await Promise.all([

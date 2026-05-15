@@ -1,8 +1,16 @@
+import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { requireAdmin } from "@/lib/auth";
 import { getStripe, stripeConfigured } from "@/lib/stripe";
 import { handler, json } from "@/lib/api-handler";
 import Stripe from "stripe";
+
+const DEMO_ID_RE = /^demo_[a-z0-9-]+_\d{8}_\d{6}_[a-z0-9]{4}$/i;
+const PendingQuery = z.object({
+  demoId: z.string().trim().max(80).optional().transform((v) =>
+    v && DEMO_ID_RE.test(v) ? v : undefined,
+  ),
+});
 
 export type PendingPaymentItem = {
   sessionId: string;
@@ -19,11 +27,16 @@ export type PendingPaymentItem = {
   attemptCount: number;
 };
 
-export const GET = handler({}, async () => {
+export const GET = handler({ query: PendingQuery }, async ({ query }) => {
   await requireAdmin();
 
+  const { demoId } = query;
+
   const sessions = await prisma.session.findMany({
-    where: { billingStatus: { in: ["PAYMENT_FAILED", "DELINQUENT"] } },
+    where: {
+      billingStatus: { in: ["PAYMENT_FAILED", "DELINQUENT"] },
+      ...(demoId ? { driver: { email: { contains: demoId } } } : {}),
+    },
     orderBy: { updatedAt: "desc" },
     include: {
       driver: { select: { id: true, name: true } },

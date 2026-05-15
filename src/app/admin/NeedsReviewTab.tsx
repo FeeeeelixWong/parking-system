@@ -103,16 +103,6 @@ function RelatedIds({ item }: { item: NeedsReviewItem }) {
   );
 }
 
-function actionPath(item: NeedsReviewItem) {
-  if (item.code === "QB_RECEIPT_MISSING" && item.related.paymentId) {
-    return `/api/admin/payments/${item.related.paymentId}/sync-receipt`;
-  }
-  if (item.code === "QB_REFUND_RECEIPT_MISSING" && item.related.paymentId) {
-    return `/api/admin/payments/${item.related.paymentId}/sync-refunds`;
-  }
-  return null;
-}
-
 function ReviewAction({
   item,
   state,
@@ -122,9 +112,9 @@ function ReviewAction({
   state: WriteState;
   onRun: (item: NeedsReviewItem) => void;
 }) {
-  const path = actionPath(item);
+  const path = item.actionPath ?? null;
 
-  // Internal POST action (QB receipt sync, etc.)
+  // Internal POST action — path is server-authored from the API response
   if (path) {
     const pending = state === "pending";
     const success = state === "success";
@@ -225,9 +215,11 @@ function ReviewCard({
 export default function NeedsReviewTab({
   mobile,
   onHasIssues,
+  demoId,
 }: {
   mobile: boolean;
   onHasIssues?: (v: boolean) => void;
+  demoId?: string;
 }) {
   const { addToast } = useToast();
   const [items, setItems] = useState<NeedsReviewItem[]>([]);
@@ -246,6 +238,7 @@ export default function NeedsReviewTab({
       limit: String(LIMIT),
       offset: String(offset),
     });
+    if (demoId) params.set("demoId", demoId);
     fetch(`/api/admin/reconcile/needs-review?${params}`)
       .then((r) => r.json())
       .then((d: NeedsReviewResponse) => {
@@ -261,7 +254,7 @@ export default function NeedsReviewTab({
         addToast({ type: "error", message: "Could not load Needs Review." });
       })
       .finally(() => setLoading(false));
-  }, [addToast, offset, onHasIssues, severityFilter]);
+  }, [addToast, demoId, offset, onHasIssues, severityFilter]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -276,7 +269,7 @@ export default function NeedsReviewTab({
   }
 
   async function runAction(item: NeedsReviewItem) {
-    const path = actionPath(item);
+    const path = item.actionPath;
     if (!path) return;
 
     setWriteStates((prev) => ({ ...prev, [item.id]: "pending" }));
@@ -340,43 +333,6 @@ export default function NeedsReviewTab({
             ? "Receipt was already linked to this payment."
             : "Sales Receipt written and payment linked.",
           tone: "success",
-          steps,
-        });
-      } else if (item.code === "QB_REFUND_RECEIPT_MISSING") {
-        const { refundedAmount, status } = data;
-        const amountStr = refundedAmount != null ? `$${Number(refundedAmount).toFixed(2)}` : null;
-        const statusStr = status ?? null;
-        const dbDetail = [amountStr && `Refunded: ${amountStr}`, statusStr && `Status: ${statusStr}`]
-          .filter(Boolean).join(" · ") || undefined;
-
-        const steps: ExternalWriteStep[] = [
-          { key: "stripe_read", label: "Stripe charge checked", status: "confirmed" },
-          {
-            key: "db_payment",
-            label: "DB refund state updated",
-            status: "confirmed",
-            detail: dbDetail,
-            externalId: item.related.paymentId,
-          },
-          {
-            key: "qb_refund_receipt",
-            label: "QuickBooks refund receipt",
-            status: "warning",
-            detail: "Not confirmed — sync did not prove QB receipt",
-          },
-          {
-            key: "needs_review",
-            label: "Needs Review follow-up",
-            status: "warning",
-            detail: "Item stays visible until QuickBooks confirms the refund receipt",
-          },
-        ];
-
-        setWriteWidgetResult({
-          itemId: item.id,
-          title: "Refund sync checked",
-          summary: "Stripe checked and DB updated. QB refund receipt not yet confirmed.",
-          tone: "warning",
           steps,
         });
       } else {

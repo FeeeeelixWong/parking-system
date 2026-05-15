@@ -3,6 +3,17 @@ import { requireAdmin } from "@/lib/auth";
 import { getStripe, stripeConfigured } from "@/lib/stripe";
 import { getSettings } from "@/lib/settings";
 import { handler, json } from "@/lib/api-handler";
+import {
+  listRecentRefundReceipts,
+  listRecentSalesReceipts,
+  type QBRefundReceiptListItem,
+  type QBSalesReceiptListItem,
+} from "@/lib/quickbooks";
+import {
+  findNearbyRefundReceiptMatches,
+  findNearbySalesReceiptMatches,
+  type NearbyQbMatch,
+} from "@/lib/qb-nearby-matches";
 import { RECONCILE_ISSUE_DEFINITIONS, type NeedsReviewCode, type NeedsReviewItem, type NeedsReviewResponse } from "@/types/reconcile";
 
 function fmt(n: number) {
@@ -22,6 +33,8 @@ function makeItem(
   related: NeedsReviewItem["related"],
   occurredAt?: string,
   actionHref?: string,
+  nearbyQbMatches?: NearbyQbMatch[],
+  actionPath?: string,
 ): NeedsReviewItem {
   // Build a stable, deterministic ID from code + related IDs
   const parts = [code, related.sessionId ?? "", related.paymentId ?? "", related.refundId ?? ""];
@@ -34,7 +47,10 @@ function makeItem(
     recommendedAction,
     actionLabel,
     actionHref,
+    actionPath,
+    actionMethod: actionPath ? "POST" : undefined,
     related,
+    nearbyQbMatches,
     occurredAt,
   };
 }
@@ -47,11 +63,17 @@ export const GET = handler({}, async ({ req }) => {
   const severityFilter = (url.searchParams.get("severity") ?? "all") as "all" | "warning" | "critical";
   const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "50", 10), 200);
   const offset = parseInt(url.searchParams.get("offset") ?? "0", 10);
+  const rawDemoId = url.searchParams.get("demoId") ?? undefined;
+  const DEMO_ID_RE = /^demo_[a-z0-9-]+_\d{8}_\d{6}_[a-z0-9]{4}$/i;
+  const demoId = rawDemoId && DEMO_ID_RE.test(rawDemoId) ? rawDemoId : undefined;
 
   const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
 
   const sessions = await prisma.session.findMany({
-    where: { createdAt: { gte: ninetyDaysAgo } },
+    where: {
+      createdAt: { gte: ninetyDaysAgo },
+      ...(demoId ? { driver: { email: { contains: demoId } } } : {}),
+    },
     orderBy: { createdAt: "desc" },
     include: {
       driver: { select: { id: true, name: true } },
@@ -137,6 +159,35 @@ export const GET = handler({}, async ({ req }) => {
   const settings = await getSettings();
   const now = new Date();
   const graceThreshold = new Date(now.getTime() - settings.gracePeriodMinutes * 60 * 1000);
+
+  const linkedReceiptIds = new Set<string>();
+  const linkedRefundReceiptIds = new Set<string>();
+  for (const s of sessions) {
+    for (const p of s.payments) {
+      if (p.qbSalesReceiptId) linkedReceiptIds.add(p.qbSalesReceiptId);
+      for (const r of p.refunds) {
+        if (r.qbRefundReceiptId) linkedRefundReceiptIds.add(r.qbRefundReceiptId);
+      }
+    }
+  }
+
+  let qbSalesReceipts: QBSalesReceiptListItem[] = [];
+  let qbRefundReceipts: QBRefundReceiptListItem[] = [];
+  try {
+    const [salesReceipts, refundReceipts] = await Promise.all([
+      listRecentSalesReceipts(90),
+      listRecentRefundReceipts(90),
+    ]);
+    qbSalesReceipts = demoId
+      ? salesReceipts.filter((r) => r.PrivateNote?.includes(`demo:${demoId}`))
+      : salesReceipts;
+    qbRefundReceipts = demoId
+      ? refundReceipts.filter((r) => r.PrivateNote?.includes(`demo:${demoId}`))
+      : refundReceipts;
+  } catch {
+    // Nearby matching is advisory. Keep Needs Review available even if QB is
+    // disconnected, rate-limited, or temporarily failing.
+  }
 
   // Unknown-reason subscription deletions — surfaced via the [SUB_DEL:UNKNOWN] audit
   // prefix written by the stripe webhook handler. These are deletions Stripe fired with
@@ -320,14 +371,25 @@ export const GET = handler({}, async ({ req }) => {
           p.createdAt.toISOString(),
         ));
       } else if (p.stripeChargeId && !p.qbSalesReceiptId) {
+        const nearbyQbMatches = findNearbySalesReceiptMatches({
+          paymentId: p.id,
+          target: { amount: p.amount, createdAt: p.createdAt, driverName },
+          receipts: qbSalesReceipts,
+          linkedReceiptIds,
+        });
         allItems.push(makeItem(
           "QB_RECEIPT_MISSING",
           "QuickBooks receipt not synced",
           `A payment of ${fmt(p.amount)} for ${driverName} (Stripe charge …${p.stripeChargeId.slice(-6)}) has no QuickBooks Sales Receipt.`,
-          "Sync the QB receipt from the Payments tab or use the action button.",
+          nearbyQbMatches.length > 0
+            ? "Compare the nearby unlinked QB receipt before writing a new one."
+            : "Sync the QB receipt from the Payments tab or use the action button.",
           "Sync receipt",
           rel({ paymentId: p.id, stripeChargeId: p.stripeChargeId }),
           p.createdAt.toISOString(),
+          undefined,
+          nearbyQbMatches,
+          `/api/admin/payments/${p.id}/sync-receipt`,
         ));
       }
 
@@ -363,14 +425,29 @@ export const GET = handler({}, async ({ req }) => {
         const rRel = rel({ paymentId: p.id, refundId: r.id, stripeRefundId: r.stripeRefundId ?? undefined });
 
         if (!r.qbRefundReceiptId) {
+          const nearbyQbMatches = findNearbyRefundReceiptMatches({
+            paymentId: p.id,
+            refundId: r.id,
+            target: { amount: r.amount, createdAt: r.createdAt, driverName },
+            refundReceipts: qbRefundReceipts,
+            linkedRefundReceiptIds,
+          });
+          // TODO: wire actionPath once POST /api/admin/payments/:id/sync-qb-refund-receipt
+          // exists and calls writeRefundReceipt(). Until then, the admin must use the
+          // nearby match candidates (if shown) to link an existing QB Refund Receipt,
+          // or write it manually from the QB dashboard.
           allItems.push(makeItem(
             "QB_REFUND_RECEIPT_MISSING",
             "QuickBooks refund receipt not synced",
             `A refund of ${fmt(r.amount)} for ${driverName} has no QuickBooks Refund Receipt.`,
-            "Sync the QB refund receipt from the Payments tab or use the action button.",
-            "Sync refund receipt",
+            nearbyQbMatches.length > 0
+              ? "Compare the nearby unlinked QB refund receipt and link it, or write the receipt manually in QuickBooks."
+              : "No nearby QB refund receipt found. Write the refund receipt manually in QuickBooks.",
+            undefined,
             rRel,
             r.createdAt.toISOString(),
+            undefined,
+            nearbyQbMatches,
           ));
         }
 

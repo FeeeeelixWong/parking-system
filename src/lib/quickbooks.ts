@@ -373,6 +373,13 @@ export async function writeSalesReceipt(args: {
   return createRes.SalesReceipt;
 }
 
+export async function getSalesReceipt(id: string): Promise<QBSalesReceiptListItem> {
+  const res = await qbFetch<{ SalesReceipt: QBSalesReceiptListItem }>(
+    `/salesreceipt/${encodeURIComponent(id)}?minorversion=65`,
+  );
+  return res.SalesReceipt;
+}
+
 // ---------------------------------------------------------------------------
 // Refund Receipt write — called from Stripe webhook on charge.refunded
 // ---------------------------------------------------------------------------
@@ -435,6 +442,13 @@ export async function writeRefundReceipt(args: {
   );
 
   return createRes.RefundReceipt;
+}
+
+export async function getRefundReceipt(id: string): Promise<QBRefundReceiptListItem> {
+  const res = await qbFetch<{ RefundReceipt: QBRefundReceiptListItem }>(
+    `/refundreceipt/${encodeURIComponent(id)}?minorversion=65`,
+  );
+  return res.RefundReceipt;
 }
 
 // ---------------------------------------------------------------------------

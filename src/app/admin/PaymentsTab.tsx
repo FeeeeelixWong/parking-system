@@ -311,7 +311,7 @@ function TransactionDetailsPopup({ payment, siblingPayments, onClose, stripeTest
 // ---------------------------------------------------------------------------
 // PaymentsTab
 // ---------------------------------------------------------------------------
-export default function PaymentsTab({ mobile, initialSearch = "" }: { mobile: boolean; initialSearch?: string }) {
+export default function PaymentsTab({ mobile, initialSearch = "", demoId }: { mobile: boolean; initialSearch?: string; demoId?: string }) {
   const [payments, setPayments] = useState<PaymentRow[]>([]);
   const [summary, setSummary] = useState<PaymentSummary | null>(null);
   const [dailyRevenue, setDailyRevenue] = useState<{ date: string; amount: number }[]>([]);
@@ -369,6 +369,7 @@ export default function PaymentsTab({ mobile, initialSearch = "" }: { mobile: bo
     const params = new URLSearchParams({ limit: String(LIMIT), offset: String(offset) });
     if (typeFilter) params.set("type", typeFilter);
     if (search.trim()) params.set("q", search.trim());
+    if (demoId) params.set("demoId", demoId);
     fetch(`/api/admin/payments?${params}`)
       .then((r) => r.json())
       .then((d) => {
@@ -390,19 +391,22 @@ export default function PaymentsTab({ mobile, initialSearch = "" }: { mobile: bo
         }).catch(() => {/* silent */});
       })
       .finally(() => setLoading(false));
-  }, [offset, typeFilter, search]);
+  }, [demoId, offset, typeFilter, search]);
 
   useEffect(() => { loadPaymentsData(); }, [loadPaymentsData]);
 
-  // Past-due subscription invoices
+  // Past-due subscription invoices — re-fetch when demoId changes
   useEffect(() => {
     setPendingLoading(true);
-    fetch("/api/admin/payments/pending")
+    const url = demoId
+      ? `/api/admin/payments/pending?demoId=${encodeURIComponent(demoId)}`
+      : "/api/admin/payments/pending";
+    fetch(url)
       .then((r) => r.json())
       .then((d) => setPendingItems(d.items ?? []))
       .catch(() => {/* silent */})
       .finally(() => setPendingLoading(false));
-  }, []);
+  }, [demoId]);
 
   // Surface QB connection + Stripe webhook status (Sales Receipt writes
   // depend on QB; reconciliation status depends on webhook heartbeat).
@@ -425,7 +429,7 @@ export default function PaymentsTab({ mobile, initialSearch = "" }: { mobile: bo
     : "No Stripe webhooks received yet";
 
   // Reset offset on filter change
-  useEffect(() => { setOffset(0); }, [typeFilter, search]);
+  useEffect(() => { setOffset(0); }, [typeFilter, search, demoId]);
 
   // Legacy QB reconciliation is retired — Stripe is the source of truth.
   const unmatchedQB: QBPaymentRecord[] = [];
@@ -741,7 +745,7 @@ export default function PaymentsTab({ mobile, initialSearch = "" }: { mobile: bo
       {loading ? (
         <p style={{ color: FG_DIM, textAlign: "center", padding: 40 }}>Loading…</p>
       ) : payments.length === 0 ? (
-        <p style={{ color: FG_DIM, textAlign: "center", padding: 40 }}>No payments found.</p>
+        <p style={{ color: FG_DIM, textAlign: "center", padding: 40 }}>{demoId ? "No payments found for this demo." : "No payments found."}</p>
       ) : (
         <>
           <div style={{ fontSize: 11, color: FG_DIM, marginBottom: 8 }}>

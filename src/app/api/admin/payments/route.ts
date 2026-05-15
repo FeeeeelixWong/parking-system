@@ -3,6 +3,8 @@ import { prisma } from "@/lib/prisma";
 import { requireAdmin } from "@/lib/auth";
 import { handler, json } from "@/lib/api-handler";
 
+const DEMO_ID_RE = /^demo_[a-z0-9-]+_\d{8}_\d{6}_[a-z0-9]{4}$/i;
+
 const PaymentsQuery = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
   offset: z.coerce.number().int().min(0).default(0),
@@ -10,12 +12,13 @@ const PaymentsQuery = z.object({
   from: z.string().optional(),
   to: z.string().optional(),
   q: z.string().optional(),
+  demoId: z.string().trim().max(80).optional().transform((v) => (v && DEMO_ID_RE.test(v) ? v : undefined)),
 });
 
 export const GET = handler({ query: PaymentsQuery }, async ({ query }) => {
   await requireAdmin();
 
-  const { limit, offset, type, from, to, q } = query;
+  const { limit, offset, type, from, to, q, demoId } = query;
 
   const where: Record<string, unknown> = {};
   if (type) where.type = type;
@@ -36,6 +39,7 @@ export const GET = handler({ query: PaymentsQuery }, async ({ query }) => {
       { legacyQbReference: { contains: q } },
     ];
   }
+  if (demoId) where.session = { driver: { email: { contains: demoId } } };
 
   const [payments, total, missingSalesReceipts, missingRefundReceipts, totals] = await Promise.all([
     prisma.payment.findMany({
@@ -60,17 +64,22 @@ export const GET = handler({ query: PaymentsQuery }, async ({ query }) => {
       where: {
         stripeChargeId: { not: null },
         qbSalesReceiptId: null,
+        ...(demoId ? { session: { driver: { email: { contains: demoId } } } } : {}),
       },
     }),
     // Divergence: Stripe refunds without QB Refund Receipt
     prisma.paymentRefund.count({
-      where: { qbRefundReceiptId: null },
+      where: {
+        qbRefundReceiptId: null,
+        ...(demoId ? { payment: { session: { driver: { email: { contains: demoId } } } } } : {}),
+      },
     }),
-    // Aggregate totals by type
+    // Aggregate totals by type — scoped to same demoId + date range as the list
     prisma.payment.groupBy({
       by: ["type"],
       where: {
         ...(from || to ? { createdAt: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } } : {}),
+        ...(demoId ? { session: { driver: { email: { contains: demoId } } } } : {}),
       },
       _sum: { amount: true, refundedAmount: true },
       _count: true,
@@ -96,11 +105,14 @@ export const GET = handler({ query: PaymentsQuery }, async ({ query }) => {
     if (t.type === "OVERSTAY") summary.overstayRevenue = net;
   }
 
-  // Daily revenue for chart (last 30 days)
+  // Daily revenue for chart (last 30 days) — scoped to demoId when active
   const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000);
   const dailyRaw = await prisma.payment.groupBy({
     by: ["createdAt"],
-    where: { createdAt: { gte: thirtyDaysAgo } },
+    where: {
+      createdAt: { gte: thirtyDaysAgo },
+      ...(demoId ? { session: { driver: { email: { contains: demoId } } } } : {}),
+    },
     _sum: { amount: true, refundedAmount: true },
   });
 

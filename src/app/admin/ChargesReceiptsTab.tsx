@@ -293,7 +293,7 @@ function PairRow({ left, right, warn, idx }: { left: React.ReactNode; right: Rea
 // ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
-export default function ChargesReceiptsTab({ mobile, onHasIssues }: { mobile: boolean; onHasIssues?: (v: boolean) => void }) {
+export default function ChargesReceiptsTab({ mobile, onHasIssues, demoId }: { mobile: boolean; onHasIssues?: (v: boolean) => void; demoId?: string }) {
   const [data, setData] = useState<ChargesReceiptsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -308,7 +308,10 @@ export default function ChargesReceiptsTab({ mobile, onHasIssues }: { mobile: bo
   const load = useCallback(() => {
     setLoading(true);
     setError(null);
-    fetch("/api/admin/reconcile/charges-receipts")
+    const url = demoId
+      ? `/api/admin/reconcile/charges-receipts?demoId=${encodeURIComponent(demoId)}`
+      : "/api/admin/reconcile/charges-receipts";
+    fetch(url)
       .then((r) => r.json())
       .then((d) => {
         if (d.error) { setError(d.error); setData(null); }
@@ -325,7 +328,7 @@ export default function ChargesReceiptsTab({ mobile, onHasIssues }: { mobile: bo
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [demoId]);
 
   useEffect(() => { load(); }, [load]);
 

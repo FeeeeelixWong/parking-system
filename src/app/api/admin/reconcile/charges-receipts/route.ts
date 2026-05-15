@@ -1,10 +1,19 @@
+import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { requireAdmin } from "@/lib/auth";
 import { listRecentCharges, listRecentRefunds, stripeConfigured } from "@/lib/stripe";
 import { listRecentSalesReceipts, listRecentRefundReceipts, QBAuthError } from "@/lib/quickbooks";
+import { findNearbySalesReceiptMatches, type NearbyQbMatch } from "@/lib/qb-nearby-matches";
 import { handler, json, conflict } from "@/lib/api-handler";
 import type { QBSalesReceiptListItem, QBRefundReceiptListItem } from "@/lib/quickbooks";
 import type Stripe from "stripe";
+
+const DEMO_ID_RE = /^demo_[a-z0-9-]+_\d{8}_\d{6}_[a-z0-9]{4}$/i;
+const ChargesReceiptsQuery = z.object({
+  demoId: z.string().trim().max(80).optional().transform((v) =>
+    v && DEMO_ID_RE.test(v) ? v : undefined,
+  ),
+});
 
 export type ChargeItem = {
   id: string;                  // ch_xxx
@@ -64,6 +73,7 @@ export type OrphanedCharge = {
   charge: ChargeItem;
   payment: PaymentRef | null;
   issue: "no_db_payment" | "no_qb_receipt";
+  nearbyQbMatches?: NearbyQbMatch[];
 };
 
 export type OrphanedRefund = {
@@ -132,18 +142,22 @@ function toRefundReceiptItem(r: QBRefundReceiptListItem): RefundReceiptItem {
 
 const DAYS = 90;
 
-export const GET = handler({}, async () => {
+export const GET = handler({ query: ChargesReceiptsQuery }, async ({ query }) => {
   await requireAdmin();
 
   if (!stripeConfigured()) throw conflict("Stripe is not configured");
+
+  const { demoId } = query;
 
   const [rawCharges, rawRefunds] = await Promise.all([
     listRecentCharges(DAYS),
     listRecentRefunds(DAYS),
   ]);
 
+  // When demoId is active, limit Stripe data to charges/refunds tagged with that testRunId in metadata.
   const charges = rawCharges
     .filter((c) => c.status === "succeeded")
+    .filter((c) => !demoId || (c.metadata as Record<string, string>)?.testRunId === demoId)
     .map(toChargeItem);
 
   const chargeById = new Map<string, ChargeItem>();
@@ -152,6 +166,7 @@ export const GET = handler({}, async () => {
   // Use the dedicated refunds list — charges.list() doesn't reliably populate refunds.data.
   const allRefunds: RefundItem[] = rawRefunds
     .filter((r) => r.status === "succeeded" && r.charge)
+    .filter((r) => !demoId || (r.metadata as Record<string, string>)?.testRunId === demoId)
     .map((r) => ({
       id: r.id,
       chargeId: typeof r.charge === "string" ? r.charge : r.charge!.id,
@@ -161,15 +176,31 @@ export const GET = handler({}, async () => {
 
   const since = new Date(Date.now() - DAYS * 24 * 60 * 60 * 1000);
   const dbPayments = await prisma.payment.findMany({
-    where: { createdAt: { gte: since } },
-    select: { id: true, type: true, sessionId: true, stripeChargeId: true, qbSalesReceiptId: true },
+    where: {
+      createdAt: { gte: since },
+      ...(demoId ? { session: { driver: { email: { contains: demoId } } } } : {}),
+    },
+    select: {
+      id: true,
+      type: true,
+      sessionId: true,
+      amount: true,
+      createdAt: true,
+      stripeChargeId: true,
+      qbSalesReceiptId: true,
+      session: { select: { driver: { select: { name: true } } } },
+    },
   });
 
   const dbByChargeId = new Map<string, typeof dbPayments[number]>();
   const dbByReceiptId = new Map<string, typeof dbPayments[number]>();
+  const linkedReceiptIds = new Set<string>();
   for (const p of dbPayments) {
     if (p.stripeChargeId) dbByChargeId.set(p.stripeChargeId, p);
-    if (p.qbSalesReceiptId) dbByReceiptId.set(p.qbSalesReceiptId, p);
+    if (p.qbSalesReceiptId) {
+      dbByReceiptId.set(p.qbSalesReceiptId, p);
+      linkedReceiptIds.add(p.qbSalesReceiptId);
+    }
   }
 
   let qbConnected = false;
@@ -189,8 +220,15 @@ export const GET = handler({}, async () => {
     }
   }
 
-  const receipts = rawReceipts.filter((r) => r.TotalAmt > 0).map(toReceiptItem);
-  const refundReceipts = rawRefundReceipts.filter((r) => r.TotalAmt > 0).map(toRefundReceiptItem);
+  const salesReceiptCandidates = rawReceipts
+    .filter((r) => r.TotalAmt > 0)
+    .filter((r) => !demoId || r.PrivateNote?.includes(`demo:${demoId}`));
+  const receipts = salesReceiptCandidates
+    .map(toReceiptItem);
+  const refundReceipts = rawRefundReceipts
+    .filter((r) => r.TotalAmt > 0)
+    .filter((r) => !demoId || r.PrivateNote?.includes(`demo:${demoId}`))
+    .map(toRefundReceiptItem);
 
   // Index sales receipts.
   const receiptById = new Map<string, ReceiptItem>();
@@ -230,10 +268,23 @@ export const GET = handler({}, async () => {
     if (receipt) {
       matched.push({ charge, receipt, payment: paymentRef });
     } else {
+      const nearbyQbMatches = dbPayment
+        ? findNearbySalesReceiptMatches({
+          paymentId: dbPayment.id,
+          target: {
+            amount: dbPayment.amount,
+            createdAt: dbPayment.createdAt,
+            driverName: dbPayment.session.driver.name,
+          },
+          receipts: salesReceiptCandidates,
+          linkedReceiptIds,
+        })
+        : [];
       orphanedCharges.push({
         charge,
         payment: paymentRef,
         issue: dbPayment ? "no_qb_receipt" : "no_db_payment",
+        nearbyQbMatches,
       });
     }
   }

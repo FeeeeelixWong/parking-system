@@ -201,6 +201,10 @@ export const SessionHistoryQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).default(0),
   // search across name/plate/phone/spot
   q: z.string().trim().max(120).optional(),
+  // demo filter: driver email contains this testRunId substring; silently ignored if malformed
+  demoId: z.string().trim().max(80).optional().transform((v) =>
+    v && /^demo_[a-z0-9-]+_\d{8}_\d{6}_[a-z0-9]{4}$/i.test(v) ? v : undefined,
+  ),
 });
 export type SessionHistoryQuery = z.infer<typeof SessionHistoryQuerySchema>;
 

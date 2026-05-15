@@ -1,0 +1,42 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/provider-test-safety.sh"
+          },
+          {
+            "type": "command",
+            "command": ".claude/hooks/pre-commit-safety.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/spec-changed-reminder.sh"
+          },
+          {
+            "type": "command",
+            "command": ".claude/hooks/api-drift-reminder.sh"
+          },
+          {
+            "type": "command",
+            "command": ".claude/hooks/prisma-migration-reminder.sh"
+          },
+          {
+            "type": "command",
+            "command": ".claude/hooks/external-write-reminder.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

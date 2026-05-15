@@ -34,7 +34,7 @@ function IssueDot() {
   );
 }
 
-export default function ReconcileView({ mobile }: { mobile: boolean }) {
+export default function ReconcileView({ mobile, demoId }: { mobile: boolean; demoId?: string }) {
   const [subTab, setSubTab] = useState<SubTab>("needs-review");
   const [issueMap, setIssueMap] = useState<Partial<Record<SubTab, boolean>>>({});
 
@@ -78,9 +78,9 @@ export default function ReconcileView({ mobile }: { mobile: boolean }) {
             );
           })}
         </div>
-        {subTab === "needs-review"     && <NeedsReviewTab mobile onHasIssues={(v) => setIssues("needs-review", v)} />}
+        {subTab === "needs-review"     && <NeedsReviewTab mobile onHasIssues={(v) => setIssues("needs-review", v)} demoId={demoId} />}
         {subTab === "sessions"         && <ReconcileTab mobile onHasIssues={(v) => setIssues("sessions", v)} />}
-        {subTab === "charges-receipts" && <ChargesReceiptsTab mobile onHasIssues={(v) => setIssues("charges-receipts", v)} />}
+        {subTab === "charges-receipts" && <ChargesReceiptsTab mobile onHasIssues={(v) => setIssues("charges-receipts", v)} demoId={demoId} />}
       </div>
     );
   }
@@ -153,9 +153,9 @@ export default function ReconcileView({ mobile }: { mobile: boolean }) {
 
       {/* Content */}
       <div style={{ flex: 1, minWidth: 0 }}>
-        {subTab === "needs-review"     && <NeedsReviewTab mobile={false} onHasIssues={(v) => setIssues("needs-review", v)} />}
+        {subTab === "needs-review"     && <NeedsReviewTab mobile={false} onHasIssues={(v) => setIssues("needs-review", v)} demoId={demoId} />}
         {subTab === "sessions"         && <ReconcileTab mobile={false} onHasIssues={(v) => setIssues("sessions", v)} />}
-        {subTab === "charges-receipts" && <ChargesReceiptsTab mobile={false} onHasIssues={(v) => setIssues("charges-receipts", v)} />}
+        {subTab === "charges-receipts" && <ChargesReceiptsTab mobile={false} onHasIssues={(v) => setIssues("charges-receipts", v)} demoId={demoId} />}
       </div>
 
     </div>

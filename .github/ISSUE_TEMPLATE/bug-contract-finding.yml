@@ -1,0 +1,52 @@
+name: Bug contract finding
+description: Report a focused finding from docs/BUG_CONTRACT.md
+title: "[Bug Contract]: "
+labels: ["bug-contract", "needs-triage"]
+body:
+  - type: input
+    id: target
+    attributes:
+      label: Contract target
+      description: The exact BUG_CONTRACT target reviewed.
+      placeholder: "Billing subscription deletion classification"
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - P0 - production emergency
+        - P1 - critical correctness or money/access risk
+        - P2 - important drift or reliability risk
+        - P3 - cleanup or observability risk
+    validations:
+      required: true
+  - type: textarea
+    id: invariant
+    attributes:
+      label: Expected invariant
+      description: What should always be true?
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: File/line references, reproduction path, command output, or screenshots.
+    validations:
+      required: true
+  - type: textarea
+    id: duplicate_check
+    attributes:
+      label: Existing issue check
+      description: Search terms used and whether this duplicates or strengthens an existing issue.
+    validations:
+      required: true
+  - type: textarea
+    id: proposed_test
+    attributes:
+      label: Test that would prove the fix
+      description: Smallest test or assertion that would make the contract true.
+    validations:
+      required: true

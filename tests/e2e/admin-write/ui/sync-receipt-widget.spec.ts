@@ -114,3 +114,53 @@ test("UI-SYNC-002: alreadySynced response omits Stripe step and shows already-li
 
   await world.cleanup();
 });
+
+// ---------------------------------------------------------------------------
+// UI-SYNC-003: Sync button posts to the server-authored actionPath
+//
+// Proves the UI reads actionPath from the API response rather than deriving
+// it client-side from item.code. Also confirms sync-refunds is never called
+// for a QB_RECEIPT_MISSING item (that was the old wrong path).
+// ---------------------------------------------------------------------------
+
+test("UI-SYNC-003: sync button posts to server-authored actionPath and not sync-refunds", async ({
+  page,
+}, testInfo) => {
+  const world = createWorld(testInfo);
+
+  const { payment } = await seedPaidDailyActiveSession(world);
+
+  let syncReceiptCalled = false;
+  let syncRefundsCalled = false;
+
+  await page.route(`**/api/admin/payments/${payment.id}/sync-receipt`, async (route) => {
+    syncReceiptCalled = true;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, qbSalesReceiptId: "QB-SYNC-003-TEST" }),
+    });
+  });
+
+  await page.route(`**/api/admin/payments/${payment.id}/sync-refunds`, async (route) => {
+    syncRefundsCalled = true;
+    await route.abort();
+  });
+
+  await page.goto("/admin?tab=reconcile");
+  await page.getByLabel("Password").fill(process.env.ADMIN_PASSWORD ?? "playwright-admin");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await page.waitForURL(/\/admin/);
+  await page.goto("/admin?tab=reconcile");
+
+  const syncButton = page.getByRole("button", { name: "Sync" }).first();
+  await syncButton.waitFor({ state: "visible", timeout: 12_000 });
+  await syncButton.click();
+
+  await expect(page.getByText("QuickBooks receipt synced")).toBeVisible({ timeout: 5_000 });
+
+  expect(syncReceiptCalled, "UI must POST to server-authored actionPath (sync-receipt)").toBe(true);
+  expect(syncRefundsCalled, "UI must not POST to sync-refunds for QB_RECEIPT_MISSING").toBe(false);
+
+  await world.cleanup();
+});

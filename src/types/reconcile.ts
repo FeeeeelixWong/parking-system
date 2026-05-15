@@ -46,6 +46,8 @@ export type NeedsReviewItem = {
   recommendedAction: string;
   actionLabel?: string;
   actionHref?: string;
+  actionPath?: string;
+  actionMethod?: "POST";
   related: {
     sessionId?: string;
     paymentId?: string;
@@ -56,6 +58,23 @@ export type NeedsReviewItem = {
     qbReceiptId?: string;
     qbRefundReceiptId?: string;
   };
+  nearbyQbMatches?: {
+    kind: "sales_receipt" | "refund_receipt";
+    qbId: string;
+    docNumber: string;
+    txnDate: string;
+    totalAmount: number;
+    customerName: string | null;
+    score: number;
+    confidence: "high" | "medium" | "low";
+    reasons: string[];
+    amountDelta: number;
+    dayDelta: number;
+    nameSimilarity: number | null;
+    linkActionPath?: string;
+    linkActionMethod?: "POST";
+    linkActionBody?: Record<string, string>;
+  }[];
   occurredAt?: string;
 };
 

@@ -9,7 +9,7 @@
     "start": "next start",
     "lint": "eslint",
     "test:e2e": "playwright test",
-    "test:e2e:driver": "playwright test tests/e2e/driver",
+    "test:e2e:driver": "playwright test tests/e2e/driver-write",
     "db:migrate": "prisma migrate dev",
     "db:migrate:deploy": "prisma migrate deploy",
     "db:migrate:reset": "prisma migrate reset",
