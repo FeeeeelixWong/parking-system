@@ -56,9 +56,20 @@ export function overstayRate(settings: RateSettings, vehicleType: VehicleType): 
 
 /** Add `months` to a base Date and return the new Date. */
 export function addMonths(base: Date, months: number): Date {
-  const result = new Date(base);
-  result.setMonth(result.getMonth() + months);
-  return result;
+  const targetMonthIndex = base.getMonth() + months;
+  const targetYear = base.getFullYear() + Math.floor(targetMonthIndex / 12);
+  const targetMonth = ((targetMonthIndex % 12) + 12) % 12;
+  const lastDayOfTargetMonth = new Date(targetYear, targetMonth + 1, 0).getDate();
+
+  return new Date(
+    targetYear,
+    targetMonth,
+    Math.min(base.getDate(), lastDayOfTargetMonth),
+    base.getHours(),
+    base.getMinutes(),
+    base.getSeconds(),
+    base.getMilliseconds(),
+  );
 }
 
 /** Compute the overstay fee preview given a session and current settings. */

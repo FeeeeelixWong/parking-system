@@ -8,6 +8,7 @@
     "postinstall": "prisma generate",
     "start": "next start",
     "lint": "eslint",
+    "test:unit": "vitest run tests/lib",
     "test:e2e": "playwright test",
     "test:e2e:driver": "playwright test tests/e2e/driver",
     "db:migrate": "prisma migrate dev",
@@ -48,6 +49,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.2.1",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^4.1.1"
   }
 }
