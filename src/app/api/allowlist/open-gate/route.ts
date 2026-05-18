@@ -8,7 +8,7 @@ import { DenialCode } from "@/types/actions";
 const AllowListOpenGateBody = z.object({
   phone: z.string().min(4),
   deviceId: z.string().optional(),
-  direction: z.enum(["ENTRANCE", "EXIT"]).optional(),
+  direction: z.enum(["ENTRANCE", "EXIT"]),
   scanContext: z.enum(["fresh", "internal"]),
 });
 
@@ -31,6 +31,11 @@ export const POST = handler({ body: AllowListOpenGateBody }, async ({ body }) =>
 
   const entry = await prisma.allowList.findUnique({ where: { phone } });
   if (!entry || !entry.active) {
+    await audit({
+      action: "GATE_DENIED",
+      details: `GATE_DENIED — NOT_ON_ALLOWLIST — phone:${phone.slice(-4)}`,
+    }).catch(() => {});
+
     return json({
       ok: false,
       denial: {

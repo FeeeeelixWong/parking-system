@@ -59,6 +59,30 @@ test("second device using same saved session is marked suspicious and does not o
   await second.close();
 });
 
+test("intermediate exit scan does not clear suspicious re-entry detection", async ({ browser }) => {
+  const { driver, session } = await seedActiveDriverSession();
+
+  const firstEntry = await browser.newPage();
+  await setSavedDriverAndDevice(firstEntry, driver, "device-a");
+  await firstEntry.goto("/entry");
+  await expect.poll(() => countAudit("GATE_OPEN", session.id)).toBe(1);
+  await firstEntry.close();
+
+  const exit = await browser.newPage();
+  await setSavedDriverAndDevice(exit, driver, "device-b");
+  await exit.goto("/exit");
+  await expect.poll(() => countAudit("GATE_OPEN", session.id)).toBe(2);
+  await exit.close();
+
+  const secondEntry = await browser.newPage();
+  await setSavedDriverAndDevice(secondEntry, driver, "device-c");
+  await secondEntry.goto("/entry");
+
+  await expect.poll(() => countAudit("GATE_OPEN", session.id)).toBe(2);
+  await expect.poll(() => countAudit("SUSPICIOUS_ENTRY", session.id)).toBe(1);
+  await secondEntry.close();
+});
+
 test("xfail: stolen saved driver identity on a new device should require PIN before opening gate", async ({ page }) => {
   test.fail(true, "Current contract trusts a valid saved driver object on a new device. Future fix: require PIN/new-device verification before gate access.");
 

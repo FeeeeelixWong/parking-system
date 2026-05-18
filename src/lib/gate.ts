@@ -23,7 +23,11 @@ export async function checkSuspiciousEntry(
 
   try {
     const recentGateEvents = await prisma.auditLog.findMany({
-      where: { sessionId, action: "GATE_OPEN" },
+      where: {
+        sessionId,
+        action: "GATE_OPEN",
+        details: { contains: "Gate entrance" },
+      },
       orderBy: { createdAt: "desc" },
       take: 1,
       select: { details: true },
