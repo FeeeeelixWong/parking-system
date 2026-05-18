@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { triggerGateOpen, checkSuspiciousEntry } from "@/lib/gate";
 import { log as audit } from "@/lib/audit";
 import { handler, json } from "@/lib/api-handler";
+import { RATE_LIMITS } from "@/lib/rate-limit";
 import { DenialCode } from "@/types/actions";
 import type { TypedDenial } from "@/types/actions";
 
@@ -18,7 +19,7 @@ function denial(d: TypedDenial) {
 }
 
 export const POST = handler(
-  { body: OpenGateBody },
+  { body: OpenGateBody, rateLimit: RATE_LIMITS.strict },
   async ({ body, params }) => {
     const { driverId, deviceId, direction, scanContext } = body;
     const sessionId = (params as { id: string }).id;

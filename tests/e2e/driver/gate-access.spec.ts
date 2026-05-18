@@ -59,6 +59,58 @@ test("second device using same saved session is marked suspicious and does not o
   await second.close();
 });
 
+test("repeated session gate commands from one IP are rate-limited", async ({ request }) => {
+  const { driver, session } = await seedActiveDriverSession();
+  const headers = { "x-forwarded-for": "198.51.100.16" };
+  const body = {
+    driverId: driver.id,
+    deviceId: "rate-limit-device",
+    direction: "EXIT",
+    scanContext: "fresh",
+  };
+
+  for (let i = 0; i < 5; i++) {
+    const res = await request.post(`/api/sessions/${session.id}/open-gate`, {
+      headers,
+      data: body,
+    });
+    expect(res.status(), `request ${i + 1}`).toBe(200);
+  }
+
+  const limited = await request.post(`/api/sessions/${session.id}/open-gate`, {
+    headers,
+    data: body,
+  });
+
+  expect(limited.status()).toBe(429);
+  expect(limited.headers()["retry-after"]).toBeTruthy();
+});
+
+test("repeated allowlist gate lookups from one IP are rate-limited", async ({ request }) => {
+  const headers = { "x-forwarded-for": "198.51.100.17" };
+  const body = {
+    phone: "5550000001",
+    direction: "ENTRANCE",
+    scanContext: "fresh",
+  };
+
+  for (let i = 0; i < 5; i++) {
+    const res = await request.post("/api/allowlist/open-gate", {
+      headers,
+      data: body,
+    });
+    expect(res.status(), `request ${i + 1}`).toBe(200);
+  }
+
+  const limited = await request.post("/api/allowlist/open-gate", {
+    headers,
+    data: body,
+  });
+
+  expect(limited.status()).toBe(429);
+  expect(limited.headers()["retry-after"]).toBeTruthy();
+});
+
 test("xfail: stolen saved driver identity on a new device should require PIN before opening gate", async ({ page }) => {
   test.fail(true, "Current contract trusts a valid saved driver object on a new device. Future fix: require PIN/new-device verification before gate access.");
 
