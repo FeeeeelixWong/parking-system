@@ -41,6 +41,19 @@ test("refresh after a fresh entry scan does not open the gate again", async ({ p
   await expect.poll(() => countAudit("GATE_OPEN", session.id)).toBe(1);
 });
 
+test("refresh after a fresh exit scan does not open the gate again", async ({ page }) => {
+  const { driver, session } = await seedActiveDriverSession();
+  await setSavedDriverAndDevice(page, driver, "device-a");
+
+  await page.goto("/exit");
+  await expect.poll(() => countAudit("GATE_OPEN", session.id)).toBe(1);
+
+  await page.reload();
+
+  await expect(page.getByText(/Please re-scan the QR code at the gate/i)).toBeVisible();
+  await expect.poll(() => countAudit("GATE_OPEN", session.id)).toBe(1);
+});
+
 test("second device using same saved session is marked suspicious and does not open gate", async ({ browser }) => {
   const { driver, session } = await seedActiveDriverSession();
 

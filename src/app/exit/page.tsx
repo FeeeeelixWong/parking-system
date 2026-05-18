@@ -1,12 +1,13 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 
 import type { OverstayInfo, ActionState } from "@/types/domain";
 import { loadDriver, saveDriver, clearDriver, getDeviceId } from "@/lib/driver-store";
 import { apiFetch, apiPost } from "@/lib/fetch";
+import { isExternalNavigation } from "@/lib/navigation";
 import PhoneInput from "@/components/PhoneInput";
 
 /* ─── types ─────────────────────────────────────────────── */
@@ -89,6 +90,14 @@ function ExitContent() {
   const [phone, setPhone] = useState("");
   const [error, setError] = useState("");
   const [actionLoading, setActionLoading] = useState(false);
+  const [gateDenied, setGateDenied] = useState(false);
+  const freshScan = useRef(false);
+
+  // Must run before the saved-driver lookup resolves: passive page loads must
+  // not self-report scanContext:"fresh" to the gate endpoints.
+  useEffect(() => {
+    freshScan.current = isExternalNavigation();
+  }, []);
 
   /* fetch settings for manager phone */
   useEffect(() => {
@@ -100,8 +109,16 @@ function ExitContent() {
   }, []);
 
   /* resolve driver state → UI state */
-  async function resolveState(digits: string, data: DriverStateResponse) {
+  async function resolveState(digits: string, data: DriverStateResponse, fresh: boolean) {
+    setGateDenied(false);
+
     if (data.allowList.allowed) {
+      if (!fresh) {
+        setGateDenied(true);
+        setState("gate_opened");
+        return;
+      }
+
       setState("gate_opening");
       try {
         await apiPost("/api/allowlist/open-gate", {
@@ -133,6 +150,12 @@ function ExitContent() {
     setSession(s);
 
     if (s.status === "ACTIVE") {
+      if (!fresh) {
+        setGateDenied(true);
+        setState("has_session");
+        return;
+      }
+
       setState("gate_opening");
       try {
         const result = await apiPost<
@@ -184,7 +207,7 @@ function ExitContent() {
     apiFetch<DriverStateResponse>(`/api/driver/state?phone=${digits}`)
       .then((data) => {
         if (data.driver?.id === saved.id || data.allowList.allowed) {
-          resolveState(digits, data);
+          resolveState(digits, data, freshScan.current);
         } else {
           clearDriver();
           setState("ask_type");
@@ -208,7 +231,7 @@ function ExitContent() {
     setActionLoading(true);
     try {
       const data = await apiFetch<DriverStateResponse>(`/api/driver/state?phone=${digits}`);
-      await resolveState(digits, data);
+      await resolveState(digits, data, true);
     } catch {
       setError("Could not look up your number. Try again.");
     } finally {
@@ -221,6 +244,7 @@ function ExitContent() {
     if (!session || !driver) return;
     setActionLoading(true);
     setError("");
+    setGateDenied(false);
     setState("gate_opening");
     try {
       const result = await apiPost<
@@ -275,6 +299,8 @@ function ExitContent() {
     <Shell>
       {state === "init" || state === "checking" ? (
         <CheckingView />
+      ) : gateDenied ? (
+        <RescanRequiredView onStartOver={() => { clearDriver(); setGateDenied(false); setState("ask_type"); }} />
       ) : state === "gate_opening" ? (
         <GateOpeningView />
       ) : state === "gate_opened" && driver && session ? (
@@ -392,6 +418,19 @@ function GateOpenedView({
       </div>
 
       <p style={styles.hint}>Scan the entry QR code to re-enter.</p>
+    </div>
+  );
+}
+
+function RescanRequiredView({ onStartOver }: { onStartOver: () => void }) {
+  return (
+    <div style={styles.center}>
+      <div style={styles.gateIcon}>↻</div>
+      <p style={styles.heading}>Please re-scan the QR code at the gate</p>
+      <p style={styles.hint}>Refresh, back, and internal links cannot open the gate.</p>
+      <button style={{ ...styles.secondaryBtn, marginTop: 24 }} onClick={onStartOver}>
+        Start over
+      </button>
     </div>
   );
 }
