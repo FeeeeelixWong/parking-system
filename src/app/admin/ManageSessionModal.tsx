@@ -3,6 +3,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { AppSettings } from "@/types/domain";
 import { useToast } from "@/app/admin/ToastContext";
+import { addMonths } from "@/lib/rates";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -91,12 +92,6 @@ function totalPaid(payments: SessionRow["payments"]): number {
 
 function hasMonthly(payments: SessionRow["payments"]): boolean {
   return payments.some((p) => p.type === "MONTHLY_CHECKIN");
-}
-
-function addMonths(d: Date, n: number): Date {
-  const r = new Date(d);
-  r.setMonth(r.getMonth() + n);
-  return r;
 }
 
 function alreadyRefunded(payments: SessionRow["payments"]): number {
